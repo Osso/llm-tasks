@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde::Serialize;
 use turso::{Builder, Connection};
 
@@ -8,7 +8,7 @@ pub struct Database {
     conn: Connection,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, PartialEq)]
 pub struct Task {
     pub id: String,
     pub title: String,
@@ -20,14 +20,14 @@ pub struct Task {
     pub updated_at: String,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, PartialEq)]
 pub struct Dependency {
     pub task_id: String,
     pub depends_on: String,
     pub dep_type: String,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, PartialEq)]
 pub struct Event {
     pub id: i64,
     pub task_id: String,
@@ -52,7 +52,13 @@ impl Database {
         Ok(Self { conn })
     }
 
-    pub async fn create_task(&self, title: &str, desc: Option<&str>, priority: u8, actor: &str) -> Result<Task> {
+    pub async fn create_task(
+        &self,
+        title: &str,
+        desc: Option<&str>,
+        priority: u8,
+        actor: &str,
+    ) -> Result<Task> {
         let id = id::generate();
         let now = now_iso();
         self.conn.execute(
@@ -72,7 +78,11 @@ impl Database {
         }
     }
 
-    pub async fn list_tasks(&self, status: Option<&str>, assignee: Option<&str>) -> Result<Vec<Task>> {
+    pub async fn list_tasks(
+        &self,
+        status: Option<&str>,
+        assignee: Option<&str>,
+    ) -> Result<Vec<Task>> {
         let (sql, params) = build_list_query(status, assignee);
         let values: Vec<turso::Value> = params.into_iter().map(turso::Value::Text).collect();
         let mut rows = self.conn.query(&sql, values).await?;
@@ -92,59 +102,147 @@ impl Database {
             bail!("Cannot claim task {}: status is {}", id, task.status);
         }
         if task.assignee.is_some() {
-            bail!("Cannot claim task {}: already assigned to {}", id, task.assignee.unwrap());
+            bail!(
+                "Cannot claim task {}: already assigned to {}",
+                id,
+                task.assignee.unwrap()
+            );
         }
         let now = now_iso();
         self.conn.execute(
             "UPDATE tasks SET assignee = ?1, status = 'in_progress', updated_at = ?2 WHERE id = ?3 AND status = 'pending' AND assignee IS NULL",
             [actor, &now, id],
         ).await?;
-        record_event(&self.conn, id, actor, "claimed", Some("assignee"), None, Some(actor)).await?;
-        record_event(&self.conn, id, actor, "updated", Some("status"), Some("pending"), Some("in_progress")).await?;
+        record_event(
+            &self.conn,
+            id,
+            actor,
+            "claimed",
+            Some("assignee"),
+            None,
+            Some(actor),
+        )
+        .await?;
+        record_event(
+            &self.conn,
+            id,
+            actor,
+            "updated",
+            Some("status"),
+            Some("pending"),
+            Some("in_progress"),
+        )
+        .await?;
         Ok(())
     }
 
-    pub async fn update_task(&self, id: &str, status: Option<&str>, priority: Option<u8>, title: Option<&str>, desc: Option<&str>, actor: &str) -> Result<()> {
+    pub async fn update_task(
+        &self,
+        id: &str,
+        status: Option<&str>,
+        priority: Option<u8>,
+        title: Option<&str>,
+        desc: Option<&str>,
+        actor: &str,
+    ) -> Result<()> {
         let task = self.get_task(id).await?;
         let now = now_iso();
         apply_field_update(&self.conn, id, actor, &now, "status", &task.status, status).await?;
-        apply_field_update(&self.conn, id, actor, &now, "priority", &task.priority.to_string(), priority.map(|p| p.to_string()).as_deref()).await?;
+        apply_field_update(
+            &self.conn,
+            id,
+            actor,
+            &now,
+            "priority",
+            &task.priority.to_string(),
+            priority.map(|p| p.to_string()).as_deref(),
+        )
+        .await?;
         apply_field_update(&self.conn, id, actor, &now, "title", &task.title, title).await?;
-        apply_field_update(&self.conn, id, actor, &now, "description", task.description.as_deref().unwrap_or(""), desc).await?;
+        apply_field_update(
+            &self.conn,
+            id,
+            actor,
+            &now,
+            "description",
+            task.description.as_deref().unwrap_or(""),
+            desc,
+        )
+        .await?;
         Ok(())
     }
 
     pub async fn close_task(&self, id: &str, actor: &str) -> Result<()> {
         let task = self.get_task(id).await?;
         let now = now_iso();
-        self.conn.execute(
-            "UPDATE tasks SET status = 'completed', updated_at = ?1 WHERE id = ?2",
-            [&now, id],
-        ).await?;
-        record_event(&self.conn, id, actor, "closed", Some("status"), Some(&task.status), Some("completed")).await?;
+        self.conn
+            .execute(
+                "UPDATE tasks SET status = 'completed', updated_at = ?1 WHERE id = ?2",
+                [&now, id],
+            )
+            .await?;
+        record_event(
+            &self.conn,
+            id,
+            actor,
+            "closed",
+            Some("status"),
+            Some(&task.status),
+            Some("completed"),
+        )
+        .await?;
         Ok(())
     }
 
-    pub async fn add_dependency(&self, task_id: &str, depends_on: &str, dep_type: &str) -> Result<()> {
+    pub async fn add_dependency(
+        &self,
+        task_id: &str,
+        depends_on: &str,
+        dep_type: &str,
+    ) -> Result<()> {
         self.get_task(task_id).await?;
         self.get_task(depends_on).await?;
-        self.conn.execute(
-            "INSERT INTO dependencies (task_id, depends_on, dep_type) VALUES (?1, ?2, ?3)",
-            [task_id, depends_on, dep_type],
-        ).await?;
+        self.conn
+            .execute(
+                "INSERT INTO dependencies (task_id, depends_on, dep_type) VALUES (?1, ?2, ?3)",
+                [task_id, depends_on, dep_type],
+            )
+            .await?;
         Ok(())
     }
 
     pub async fn remove_dependency(&self, task_id: &str, depends_on: &str) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM dependencies WHERE task_id = ?1 AND depends_on = ?2",
-            [task_id, depends_on],
-        ).await?;
+        self.conn
+            .execute(
+                "DELETE FROM dependencies WHERE task_id = ?1 AND depends_on = ?2",
+                [task_id, depends_on],
+            )
+            .await?;
         Ok(())
     }
 
     pub async fn get_dependencies(&self, task_id: &str) -> Result<Vec<Dependency>> {
-        let mut stmt = self.conn.prepare("SELECT task_id, depends_on, dep_type FROM dependencies WHERE task_id = ?1").await?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT task_id, depends_on, dep_type FROM dependencies WHERE task_id = ?1")
+            .await?;
+        let mut rows = stmt.query([task_id]).await?;
+        let mut deps = Vec::new();
+        while let Some(row) = rows.next().await? {
+            deps.push(Dependency {
+                task_id: get_string(&row, 0),
+                depends_on: get_string(&row, 1),
+                dep_type: get_string(&row, 2),
+            });
+        }
+        Ok(deps)
+    }
+
+    pub async fn get_reverse_dependencies(&self, task_id: &str) -> Result<Vec<Dependency>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT task_id, depends_on, dep_type FROM dependencies WHERE depends_on = ?1")
+            .await?;
         let mut rows = stmt.query([task_id]).await?;
         let mut deps = Vec::new();
         while let Some(row) = rows.next().await? {
@@ -179,8 +277,10 @@ async fn create_tasks_table(conn: &Connection) -> Result<()> {
             assignee TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
-        )", (),
-    ).await?;
+        )",
+        (),
+    )
+    .await?;
     Ok(())
 }
 
@@ -191,8 +291,10 @@ async fn create_dependencies_table(conn: &Connection) -> Result<()> {
             depends_on TEXT NOT NULL REFERENCES tasks(id),
             dep_type TEXT NOT NULL DEFAULT 'blocks',
             PRIMARY KEY (task_id, depends_on)
-        )", (),
-    ).await?;
+        )",
+        (),
+    )
+    .await?;
     Ok(())
 }
 
@@ -207,8 +309,10 @@ async fn create_events_table(conn: &Connection) -> Result<()> {
             old_value TEXT,
             new_value TEXT,
             timestamp TEXT NOT NULL
-        )", (),
-    ).await?;
+        )",
+        (),
+    )
+    .await?;
     Ok(())
 }
 
@@ -219,7 +323,15 @@ async fn create_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-async fn record_event(conn: &Connection, task_id: &str, actor: &str, action: &str, field: Option<&str>, old: Option<&str>, new: Option<&str>) -> Result<()> {
+async fn record_event(
+    conn: &Connection,
+    task_id: &str,
+    actor: &str,
+    action: &str,
+    field: Option<&str>,
+    old: Option<&str>,
+    new: Option<&str>,
+) -> Result<()> {
     let now = now_iso();
     conn.execute(
         "INSERT INTO events (task_id, actor, action, field, old_value, new_value, timestamp) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -228,12 +340,34 @@ async fn record_event(conn: &Connection, task_id: &str, actor: &str, action: &st
     Ok(())
 }
 
-async fn apply_field_update(conn: &Connection, id: &str, actor: &str, now: &str, field: &str, old: &str, new: Option<&str>) -> Result<()> {
+async fn apply_field_update(
+    conn: &Connection,
+    id: &str,
+    actor: &str,
+    now: &str,
+    field: &str,
+    old: &str,
+    new: Option<&str>,
+) -> Result<()> {
     let Some(new_val) = new else { return Ok(()) };
-    if new_val == old { return Ok(()) }
-    let sql = format!("UPDATE tasks SET {} = ?1, updated_at = ?2 WHERE id = ?3", field);
+    if new_val == old {
+        return Ok(());
+    }
+    let sql = format!(
+        "UPDATE tasks SET {} = ?1, updated_at = ?2 WHERE id = ?3",
+        field
+    );
     conn.execute(&sql, [new_val, now, id]).await?;
-    record_event(conn, id, actor, "updated", Some(field), Some(old), Some(new_val)).await?;
+    record_event(
+        conn,
+        id,
+        actor,
+        "updated",
+        Some(field),
+        Some(old),
+        Some(new_val),
+    )
+    .await?;
     Ok(())
 }
 
