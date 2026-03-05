@@ -1,4 +1,4 @@
-use llm_tasks::db::Database;
+use llm_tasks::db::{Database, TaskUpdates};
 use tempfile::TempDir;
 
 async fn temp_db() -> (Database, TempDir) {
@@ -11,7 +11,10 @@ async fn temp_db() -> (Database, TempDir) {
 #[tokio::test]
 async fn create_task_returns_pending() {
     let (db, _dir) = temp_db().await;
-    let task = db.create_task("Build feature", Some("Details"), 2, "agent-1").await.unwrap();
+    let task = db
+        .create_task("Build feature", Some("Details"), 2, "agent-1")
+        .await
+        .unwrap();
 
     assert!(task.id.starts_with("lt-"));
     assert_eq!(task.title, "Build feature");
@@ -126,7 +129,13 @@ async fn update_changes_fields() {
     let (db, _dir) = temp_db().await;
     let task = db.create_task("Original", None, 1, "a").await.unwrap();
 
-    db.update_task(&task.id, None, Some(3), Some("Renamed"), Some("New desc"), "a").await.unwrap();
+    db.update_task(
+        &task.id,
+        TaskUpdates { priority: Some(3), title: Some("Renamed"), description: Some("New desc"), ..Default::default() },
+        "a",
+    )
+    .await
+    .unwrap();
 
     let updated = db.get_task(&task.id).await.unwrap();
     assert_eq!(updated.title, "Renamed");
@@ -139,7 +148,9 @@ async fn update_skips_unchanged_fields() {
     let (db, _dir) = temp_db().await;
     let task = db.create_task("Same", None, 1, "a").await.unwrap();
 
-    db.update_task(&task.id, Some("pending"), Some(1), Some("Same"), None, "a").await.unwrap();
+    db.update_task(&task.id, TaskUpdates { status: Some("pending"), priority: Some(1), title: Some("Same"), ..Default::default() }, "a")
+        .await
+        .unwrap();
 
     let events = db.get_events(&task.id).await.unwrap();
     assert_eq!(events.len(), 1);
@@ -153,7 +164,9 @@ async fn ready_returns_unblocked_only() {
     let blocked = db.create_task("Blocked", None, 2, "a").await.unwrap();
     let free = db.create_task("Free", None, 1, "a").await.unwrap();
 
-    db.add_dependency(&blocked.id, &blocker.id, "blocks").await.unwrap();
+    db.add_dependency(&blocked.id, &blocker.id, "blocks")
+        .await
+        .unwrap();
 
     let ready = db.ready_tasks().await.unwrap();
     let ids: Vec<&str> = ready.iter().map(|t| t.id.as_str()).collect();
@@ -169,11 +182,25 @@ async fn completing_blocker_unblocks_dependent() {
     let blocker = db.create_task("Blocker", None, 0, "a").await.unwrap();
     let blocked = db.create_task("Blocked", None, 0, "a").await.unwrap();
 
-    db.add_dependency(&blocked.id, &blocker.id, "blocks").await.unwrap();
-    assert!(!db.ready_tasks().await.unwrap().iter().any(|t| t.id == blocked.id));
+    db.add_dependency(&blocked.id, &blocker.id, "blocks")
+        .await
+        .unwrap();
+    assert!(
+        !db.ready_tasks()
+            .await
+            .unwrap()
+            .iter()
+            .any(|t| t.id == blocked.id)
+    );
 
     db.close_task(&blocker.id, "a").await.unwrap();
-    assert!(db.ready_tasks().await.unwrap().iter().any(|t| t.id == blocked.id));
+    assert!(
+        db.ready_tasks()
+            .await
+            .unwrap()
+            .iter()
+            .any(|t| t.id == blocked.id)
+    );
 }
 
 #[tokio::test]
@@ -209,8 +236,16 @@ async fn add_dependency_validates_tasks_exist() {
     let (db, _dir) = temp_db().await;
     let task = db.create_task("Real", None, 0, "a").await.unwrap();
 
-    assert!(db.add_dependency(&task.id, "lt-fake", "blocks").await.is_err());
-    assert!(db.add_dependency("lt-fake", &task.id, "blocks").await.is_err());
+    assert!(
+        db.add_dependency(&task.id, "lt-fake", "blocks")
+            .await
+            .is_err()
+    );
+    assert!(
+        db.add_dependency("lt-fake", &task.id, "blocks")
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -261,16 +296,24 @@ async fn events_track_field_updates() {
     let (db, _dir) = temp_db().await;
     let task = db.create_task("Before", None, 1, "a").await.unwrap();
 
-    db.update_task(&task.id, None, Some(3), Some("After"), None, "editor").await.unwrap();
+    db.update_task(&task.id, TaskUpdates { priority: Some(3), title: Some("After"), ..Default::default() }, "editor")
+        .await
+        .unwrap();
 
     let events = db.get_events(&task.id).await.unwrap();
     assert_eq!(events.len(), 3); // created + priority + title
 
-    let priority_ev = events.iter().find(|e| e.field.as_deref() == Some("priority")).unwrap();
+    let priority_ev = events
+        .iter()
+        .find(|e| e.field.as_deref() == Some("priority"))
+        .unwrap();
     assert_eq!(priority_ev.old_value.as_deref(), Some("1"));
     assert_eq!(priority_ev.new_value.as_deref(), Some("3"));
 
-    let title_ev = events.iter().find(|e| e.field.as_deref() == Some("title")).unwrap();
+    let title_ev = events
+        .iter()
+        .find(|e| e.field.as_deref() == Some("title"))
+        .unwrap();
     assert_eq!(title_ev.old_value.as_deref(), Some("Before"));
     assert_eq!(title_ev.new_value.as_deref(), Some("After"));
 }

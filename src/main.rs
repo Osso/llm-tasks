@@ -1,5 +1,5 @@
 use llm_tasks::cli::{Cli, Command, DepCommand};
-use llm_tasks::db::{Database, Dependency, Event, Task};
+use llm_tasks::db::{Database, Dependency, Event, Task, TaskUpdates};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -10,12 +10,35 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Init => println!("Database initialized at {}", cli.db_path().display()),
-        Command::Create { title, description, priority } => cmd_create(&db, &title, description.as_deref(), priority, &actor, json).await?,
-        Command::List { status, assignee } => cmd_list(&db, status.as_deref(), assignee.as_deref(), json).await?,
+        Command::Create {
+            title,
+            description,
+            priority,
+        } => cmd_create(&db, &title, description.as_deref(), priority, &actor, json).await?,
+        Command::List { status, assignee } => {
+            cmd_list(&db, status.as_deref(), assignee.as_deref(), json).await?
+        }
         Command::Ready => cmd_ready(&db, json).await?,
         Command::Show { id } => cmd_show(&db, &id, json).await?,
         Command::Claim { id } => cmd_claim(&db, &id, &actor).await?,
-        Command::Update { id, status, priority, title, description } => cmd_update(&db, &id, status.as_deref(), priority, title.as_deref(), description.as_deref(), &actor).await?,
+        Command::Update {
+            id,
+            status,
+            priority,
+            title,
+            description,
+        } => {
+            cmd_update(
+                &db,
+                &id,
+                status.as_deref(),
+                priority,
+                title.as_deref(),
+                description.as_deref(),
+                &actor,
+            )
+            .await?
+        }
         Command::Close { id } => cmd_close(&db, &id, &actor).await?,
         Command::Dep { command } => cmd_dep(&db, command).await?,
         Command::History { id } => cmd_history(&db, &id, json).await?,
@@ -24,7 +47,14 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_create(db: &Database, title: &str, desc: Option<&str>, priority: u8, actor: &str, json: bool) -> anyhow::Result<()> {
+async fn cmd_create(
+    db: &Database,
+    title: &str,
+    desc: Option<&str>,
+    priority: u8,
+    actor: &str,
+    json: bool,
+) -> anyhow::Result<()> {
     let task = db.create_task(title, desc, priority, actor).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&task)?);
@@ -34,13 +64,22 @@ async fn cmd_create(db: &Database, title: &str, desc: Option<&str>, priority: u8
     Ok(())
 }
 
-async fn cmd_list(db: &Database, status: Option<&str>, assignee: Option<&str>, json: bool) -> anyhow::Result<()> {
+async fn cmd_list(
+    db: &Database,
+    status: Option<&str>,
+    assignee: Option<&str>,
+    json: bool,
+) -> anyhow::Result<()> {
     let tasks = db.list_tasks(status, assignee).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&tasks)?);
     } else {
         for t in &tasks {
-            let who = t.assignee.as_deref().map(|a| format!("({})", a)).unwrap_or_default();
+            let who = t
+                .assignee
+                .as_deref()
+                .map(|a| format!("({})", a))
+                .unwrap_or_default();
             println!("{} [{}] {} {}", t.id, t.status, t.title, who);
         }
     }
@@ -78,8 +117,17 @@ async fn cmd_claim(db: &Database, id: &str, actor: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_update(db: &Database, id: &str, status: Option<&str>, priority: Option<u8>, title: Option<&str>, desc: Option<&str>, actor: &str) -> anyhow::Result<()> {
-    db.update_task(id, status, priority, title, desc, actor).await?;
+async fn cmd_update(
+    db: &Database,
+    id: &str,
+    status: Option<&str>,
+    priority: Option<u8>,
+    title: Option<&str>,
+    desc: Option<&str>,
+    actor: &str,
+) -> anyhow::Result<()> {
+    let updates = TaskUpdates { status, priority, title, description: desc, ..Default::default() };
+    db.update_task(id, updates, actor).await?;
     println!("Updated {}", id);
     Ok(())
 }
@@ -110,7 +158,13 @@ async fn cmd_history(db: &Database, id: &str, json: bool) -> anyhow::Result<()> 
         println!("{}", serde_json::to_string_pretty(&events)?);
     } else {
         for e in &events {
-            println!("{} {} {} {}", e.timestamp, e.actor, e.action, event_detail(e));
+            println!(
+                "{} {} {} {}",
+                e.timestamp,
+                e.actor,
+                e.action,
+                event_detail(e)
+            );
         }
     }
     Ok(())
