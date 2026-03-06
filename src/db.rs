@@ -238,6 +238,20 @@ impl Database {
         Ok(())
     }
 
+    pub async fn delete_task(&self, id: &str) -> Result<()> {
+        let conn = self.conn.clone();
+        let id = id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let c = conn.lock().unwrap();
+            c.execute("DELETE FROM events WHERE task_id = ?1", params![&id])?;
+            c.execute("DELETE FROM dependencies WHERE task_id = ?1 OR depends_on = ?1", params![&id])?;
+            c.execute("DELETE FROM tasks WHERE id = ?1", params![&id])?;
+            Ok(())
+        })
+        .await??;
+        Ok(())
+    }
+
     pub async fn remove_dependency(&self, task_id: &str, depends_on: &str) -> Result<()> {
         let conn = self.conn.clone();
         let task_id = task_id.to_string();
