@@ -195,6 +195,25 @@ impl Database {
         .await?
     }
 
+    /// Set assignee to NULL (not empty string).
+    pub async fn clear_assignee(&self, id: &str, actor: &str) -> Result<()> {
+        let now = now_iso();
+        let conn = self.conn.clone();
+        let id = id.to_string();
+        let actor = actor.to_string();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let c = conn.lock().unwrap();
+            c.execute(
+                "UPDATE tasks SET assignee = NULL, updated_at = ?1 WHERE id = ?2",
+                params![&now, &id],
+            )?;
+            record_event(&c, &id, &actor, "updated", Some("assignee"), None, None)?;
+            Ok(())
+        })
+        .await??;
+        Ok(())
+    }
+
     pub async fn close_task(&self, id: &str, actor: &str) -> Result<()> {
         let task = self.get_task(id).await?;
         let now = now_iso();
