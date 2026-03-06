@@ -317,3 +317,63 @@ async fn events_track_field_updates() {
     assert_eq!(title_ev.old_value.as_deref(), Some("Before"));
     assert_eq!(title_ev.new_value.as_deref(), Some("After"));
 }
+
+#[tokio::test]
+async fn add_and_get_comments() {
+    let (db, _dir) = temp_db().await;
+    let task = db.create_task("Commentable", None, 0, "a").await.unwrap();
+
+    let c1 = db.add_comment(&task.id, "dev-0", "Blocked: need API key").await.unwrap();
+    let c2 = db.add_comment(&task.id, "manager", "Use env var SECRET_KEY").await.unwrap();
+
+    assert_eq!(c1.actor, "dev-0");
+    assert_eq!(c1.content, "Blocked: need API key");
+    assert_eq!(c2.actor, "manager");
+
+    let comments = db.get_comments(&task.id).await.unwrap();
+    assert_eq!(comments.len(), 2);
+    assert_eq!(comments[0].id, c1.id);
+    assert_eq!(comments[1].id, c2.id);
+}
+
+#[tokio::test]
+async fn comments_empty_for_no_comments() {
+    let (db, _dir) = temp_db().await;
+    let task = db.create_task("Silent", None, 0, "a").await.unwrap();
+
+    let comments = db.get_comments(&task.id).await.unwrap();
+    assert!(comments.is_empty());
+}
+
+#[tokio::test]
+async fn clear_assignee_sets_null() {
+    let (db, _dir) = temp_db().await;
+    let task = db.create_task("Assigned", None, 0, "a").await.unwrap();
+    db.claim_task(&task.id, "dev-0").await.unwrap();
+
+    assert_eq!(db.get_task(&task.id).await.unwrap().assignee.as_deref(), Some("dev-0"));
+
+    db.clear_assignee(&task.id, "runtime").await.unwrap();
+    let updated = db.get_task(&task.id).await.unwrap();
+    assert!(updated.assignee.is_none());
+}
+
+#[tokio::test]
+async fn clear_assignee_makes_task_ready_dispatchable() {
+    let (db, _dir) = temp_db().await;
+    let task = db.create_task("Stuck", None, 0, "a").await.unwrap();
+    db.claim_task(&task.id, "dev-0").await.unwrap();
+
+    // Set back to ready but assignee still set
+    let updates = TaskUpdates { status: Some("ready"), ..Default::default() };
+    db.update_task(&task.id, updates, "runtime").await.unwrap();
+
+    // ready_tasks requires assignee IS NULL — should NOT find it yet
+    let ready = db.ready_tasks().await.unwrap();
+    assert!(!ready.iter().any(|t| t.id == task.id));
+
+    // After clearing assignee, ready_tasks should find it
+    db.clear_assignee(&task.id, "runtime").await.unwrap();
+    let ready = db.ready_tasks().await.unwrap();
+    assert!(ready.iter().any(|t| t.id == task.id));
+}
