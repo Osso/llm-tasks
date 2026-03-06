@@ -422,7 +422,9 @@ fn apply_field_update(
         "UPDATE tasks SET {} = ?1, updated_at = ?2 WHERE id = ?3",
         field
     );
-    conn.execute(&sql, params![new_val, now, id])?;
+    // Empty string means "clear the field" → store as NULL
+    let db_val: Option<&str> = if new_val.is_empty() { None } else { Some(new_val) };
+    conn.execute(&sql, params![db_val, now, id])?;
     record_event(conn, id, actor, "updated", Some(field), Some(old), Some(new_val))?;
     Ok(())
 }
