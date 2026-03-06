@@ -38,6 +38,15 @@ pub struct Dependency {
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct Comment {
+    pub id: i64,
+    pub task_id: String,
+    pub actor: String,
+    pub content: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
 pub struct Event {
     pub id: i64,
     pub task_id: String,
@@ -214,6 +223,46 @@ impl Database {
         Ok(())
     }
 
+    pub async fn add_comment(&self, task_id: &str, actor: &str, content: &str) -> Result<Comment> {
+        let now = now_iso();
+        let conn = self.conn.clone();
+        let task_id = task_id.to_string();
+        let actor = actor.to_string();
+        let content = content.to_string();
+        tokio::task::spawn_blocking(move || {
+            let c = conn.lock().unwrap();
+            c.execute(
+                "INSERT INTO comments (task_id, actor, content, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params![&task_id, &actor, &content, &now],
+            )?;
+            let id = c.last_insert_rowid();
+            Ok(Comment { id, task_id, actor, content, created_at: now })
+        })
+        .await?
+    }
+
+    pub async fn get_comments(&self, task_id: &str) -> Result<Vec<Comment>> {
+        let conn = self.conn.clone();
+        let task_id = task_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let c = conn.lock().unwrap();
+            let mut stmt = c.prepare(
+                "SELECT id, task_id, actor, content, created_at FROM comments WHERE task_id = ?1 ORDER BY id",
+            )?;
+            let rows = stmt.query_map(params![&task_id], |row| {
+                Ok(Comment {
+                    id: row.get(0)?,
+                    task_id: row.get(1)?,
+                    actor: row.get(2)?,
+                    content: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        })
+        .await?
+    }
+
     pub async fn close_task(&self, id: &str, actor: &str) -> Result<()> {
         let task = self.get_task(id).await?;
         let now = now_iso();
@@ -351,35 +400,31 @@ impl Database {
     }
 }
 
+const SCHEMA: &str = "
+    CREATE TABLE IF NOT EXISTS tasks (
+        id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT,
+        status TEXT NOT NULL DEFAULT 'pending', priority INTEGER NOT NULL DEFAULT 0,
+        assignee TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS dependencies (
+        task_id TEXT NOT NULL REFERENCES tasks(id),
+        depends_on TEXT NOT NULL REFERENCES tasks(id),
+        dep_type TEXT NOT NULL DEFAULT 'blocks',
+        PRIMARY KEY (task_id, depends_on)
+    );
+    CREATE TABLE IF NOT EXISTS events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL REFERENCES tasks(id),
+        actor TEXT NOT NULL, action TEXT NOT NULL, field TEXT,
+        old_value TEXT, new_value TEXT, timestamp TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS comments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL REFERENCES tasks(id),
+        actor TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL
+    );
+";
+
 fn create_schema(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS tasks (
-            id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            description TEXT,
-            status TEXT NOT NULL DEFAULT 'pending',
-            priority INTEGER NOT NULL DEFAULT 0,
-            assignee TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS dependencies (
-            task_id TEXT NOT NULL REFERENCES tasks(id),
-            depends_on TEXT NOT NULL REFERENCES tasks(id),
-            dep_type TEXT NOT NULL DEFAULT 'blocks',
-            PRIMARY KEY (task_id, depends_on)
-        );
-        CREATE TABLE IF NOT EXISTS events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            task_id TEXT NOT NULL REFERENCES tasks(id),
-            actor TEXT NOT NULL,
-            action TEXT NOT NULL,
-            field TEXT,
-            old_value TEXT,
-            new_value TEXT,
-            timestamp TEXT NOT NULL
-        );"
-    )?;
+    conn.execute_batch(SCHEMA)?;
     Ok(())
 }
 

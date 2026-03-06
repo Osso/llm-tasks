@@ -5,45 +5,34 @@ use llm_tasks::db::{Database, Dependency, Event, Task, TaskUpdates};
 async fn main() -> anyhow::Result<()> {
     let cli = <Cli as clap::Parser>::parse();
     let db = Database::open(&cli.db_path()).await?;
+    dispatch(cli, &db).await
+}
+
+async fn dispatch(cli: Cli, db: &Database) -> anyhow::Result<()> {
     let actor = cli.actor();
     let json = cli.json;
-
     match cli.command {
         Command::Init => println!("Database initialized at {}", cli.db_path().display()),
-        Command::Create {
-            title,
-            description,
-            priority,
-        } => cmd_create(&db, &title, description.as_deref(), priority, &actor, json).await?,
+        Command::Create { title, description, priority } => {
+            cmd_create(db, &title, description.as_deref(), priority, &actor, json).await?
+        }
         Command::List { status, assignee } => {
-            cmd_list(&db, status.as_deref(), assignee.as_deref(), json).await?
+            cmd_list(db, status.as_deref(), assignee.as_deref(), json).await?
         }
-        Command::Ready => cmd_ready(&db, json).await?,
-        Command::Show { id } => cmd_show(&db, &id, json).await?,
-        Command::Claim { id } => cmd_claim(&db, &id, &actor).await?,
-        Command::Update {
-            id,
-            status,
-            priority,
-            title,
-            description,
-        } => {
-            cmd_update(
-                &db,
-                &id,
-                status.as_deref(),
-                priority,
-                title.as_deref(),
-                description.as_deref(),
-                &actor,
-            )
-            .await?
+        Command::Ready => cmd_ready(db, json).await?,
+        Command::Show { id } => cmd_show(db, &id, json).await?,
+        Command::Claim { id } => cmd_claim(db, &id, &actor).await?,
+        Command::Update { id, status, priority, title, description } => {
+            let s = status.as_deref();
+            let t = title.as_deref();
+            let d = description.as_deref();
+            cmd_update(db, &id, s, priority, t, d, &actor).await?
         }
-        Command::Close { id } => cmd_close(&db, &id, &actor).await?,
-        Command::Dep { command } => cmd_dep(&db, command).await?,
-        Command::History { id } => cmd_history(&db, &id, json).await?,
+        Command::Close { id } => cmd_close(db, &id, &actor).await?,
+        Command::Comment { id, content } => cmd_comment(db, &id, &content, &actor, json).await?,
+        Command::Dep { command } => cmd_dep(db, command).await?,
+        Command::History { id } => cmd_history(db, &id, json).await?,
     }
-
     Ok(())
 }
 
@@ -101,12 +90,17 @@ async fn cmd_ready(db: &Database, json: bool) -> anyhow::Result<()> {
 async fn cmd_show(db: &Database, id: &str, json: bool) -> anyhow::Result<()> {
     let task = db.get_task(id).await?;
     let deps = db.get_dependencies(id).await?;
+    let comments = db.get_comments(id).await?;
     if json {
         let mut val = serde_json::to_value(&task)?;
         val["dependencies"] = serde_json::to_value(&deps)?;
+        val["comments"] = serde_json::to_value(&comments)?;
         println!("{}", serde_json::to_string_pretty(&val)?);
     } else {
         print_task(&task, &deps);
+        for c in &comments {
+            println!("  [{} @{}] {}", c.created_at, c.actor, c.content);
+        }
     }
     Ok(())
 }
@@ -148,6 +142,16 @@ async fn cmd_dep(db: &Database, command: DepCommand) -> anyhow::Result<()> {
             db.remove_dependency(&id, &blocker).await?;
             println!("Removed dependency {} -> {}", blocker, id);
         }
+    }
+    Ok(())
+}
+
+async fn cmd_comment(db: &Database, id: &str, content: &str, actor: &str, json: bool) -> anyhow::Result<()> {
+    let comment = db.add_comment(id, actor, content).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&comment)?);
+    } else {
+        println!("Comment added to {}", id);
     }
     Ok(())
 }

@@ -115,6 +115,14 @@ pub enum Command {
         command: DepCommand,
     },
 
+    /// Add a comment to a task
+    Comment {
+        /// Task ID
+        id: String,
+        /// Comment text
+        content: String,
+    },
+
     /// Show task event history
     History {
         /// Task ID
