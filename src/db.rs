@@ -17,6 +17,7 @@ pub struct Task {
     pub status: String,
     pub priority: u8,
     pub assignee: Option<String>,
+    pub target_branch: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -28,6 +29,7 @@ pub struct TaskUpdates<'a> {
     pub title: Option<&'a str>,
     pub description: Option<&'a str>,
     pub assignee: Option<&'a str>,
+    pub target_branch: Option<&'a str>,
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
@@ -82,6 +84,17 @@ impl Database {
         priority: u8,
         actor: &str,
     ) -> Result<Task> {
+        self.create_task_with_branch(title, desc, priority, actor, None).await
+    }
+
+    pub async fn create_task_with_branch(
+        &self,
+        title: &str,
+        desc: Option<&str>,
+        priority: u8,
+        actor: &str,
+        target_branch: Option<&str>,
+    ) -> Result<Task> {
         let id = id::generate();
         let now = now_iso();
         let conn = self.conn.clone();
@@ -89,11 +102,12 @@ impl Database {
         let title = title.to_string();
         let desc = desc.map(|s| s.to_string());
         let actor = actor.to_string();
+        let target_branch = target_branch.map(|s| s.to_string());
         tokio::task::spawn_blocking(move || -> Result<()> {
             let c = conn.lock().unwrap();
             c.execute(
-                "INSERT INTO tasks (id, title, description, status, priority, assignee, created_at, updated_at) VALUES (?1, ?2, ?3, 'pending', ?4, NULL, ?5, ?5)",
-                params![&id2, &title, desc.as_deref().unwrap_or(""), priority, &now],
+                "INSERT INTO tasks (id, title, description, status, priority, assignee, target_branch, created_at, updated_at) VALUES (?1, ?2, ?3, 'pending', ?4, NULL, ?5, ?6, ?6)",
+                params![&id2, &title, desc.as_deref().unwrap_or(""), priority, target_branch.as_deref(), &now],
             )?;
             record_event(&c, &id2, &actor, "created", None, None, None)?;
             Ok(())
@@ -107,7 +121,7 @@ impl Database {
         let id = id.to_string();
         tokio::task::spawn_blocking(move || {
             let c = conn.lock().unwrap();
-            let mut stmt = c.prepare("SELECT id, title, description, status, priority, assignee, created_at, updated_at FROM tasks WHERE id = ?1")?;
+            let mut stmt = c.prepare("SELECT id, title, description, status, priority, assignee, target_branch, created_at, updated_at FROM tasks WHERE id = ?1")?;
             let mut rows = stmt.query(params![&id])?;
             match rows.next()? {
                 Some(row) => Ok(row_to_task(row)),
@@ -139,7 +153,7 @@ impl Database {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let c = conn.lock().unwrap();
-            let sql = "SELECT t.id, t.title, t.description, t.status, t.priority, t.assignee, t.created_at, t.updated_at FROM tasks t WHERE t.status IN ('pending', 'ready') AND t.assignee IS NULL AND t.id NOT IN (SELECT d.task_id FROM dependencies d JOIN tasks bt ON d.depends_on = bt.id WHERE bt.status NOT IN ('completed', 'done')) ORDER BY t.priority DESC, t.created_at ASC";
+            let sql = "SELECT t.id, t.title, t.description, t.status, t.priority, t.assignee, t.target_branch, t.created_at, t.updated_at FROM tasks t WHERE t.status IN ('pending', 'ready') AND t.assignee IS NULL AND t.id NOT IN (SELECT d.task_id FROM dependencies d JOIN tasks bt ON d.depends_on = bt.id WHERE bt.status NOT IN ('completed', 'done')) ORDER BY t.priority DESC, t.created_at ASC";
             let mut stmt = c.prepare(sql)?;
             let mut rows = stmt.query([])?;
             collect_tasks(&mut rows)
@@ -193,12 +207,14 @@ impl Database {
         let title = updates.title.map(|s| s.to_string());
         let description = updates.description.map(|s| s.to_string());
         let assignee = updates.assignee.map(|s| s.to_string());
+        let target_branch = updates.target_branch.map(|s| s.to_string());
         tokio::task::spawn_blocking(move || {
             let c = conn.lock().unwrap();
             apply_task_fields(
                 &c, &id, &actor, &now, &task,
                 status.as_deref(), priority, title.as_deref(),
                 description.as_deref(), assignee.as_deref(),
+                target_branch.as_deref(),
             )
         })
         .await?
@@ -404,7 +420,7 @@ const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS tasks (
         id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT,
         status TEXT NOT NULL DEFAULT 'pending', priority INTEGER NOT NULL DEFAULT 0,
-        assignee TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        assignee TEXT, target_branch TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS dependencies (
         task_id TEXT NOT NULL REFERENCES tasks(id),
@@ -425,6 +441,18 @@ const SCHEMA: &str = "
 
 fn create_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA)?;
+    migrate(conn)?;
+    Ok(())
+}
+
+fn migrate(conn: &Connection) -> Result<()> {
+    // Add target_branch column if missing (existing DBs created before this field).
+    let has_col: bool = conn
+        .prepare("SELECT target_branch FROM tasks LIMIT 0")
+        .is_ok();
+    if !has_col {
+        conn.execute_batch("ALTER TABLE tasks ADD COLUMN target_branch TEXT")?;
+    }
     Ok(())
 }
 
@@ -456,6 +484,7 @@ fn apply_task_fields(
     title: Option<&str>,
     description: Option<&str>,
     assignee: Option<&str>,
+    target_branch: Option<&str>,
 ) -> Result<()> {
     apply_field_update(conn, id, actor, now, "status", &task.status, status)?;
     let pri = task.priority.to_string();
@@ -466,6 +495,8 @@ fn apply_task_fields(
     apply_field_update(conn, id, actor, now, "description", desc, description)?;
     let asgn = task.assignee.as_deref().unwrap_or("");
     apply_field_update(conn, id, actor, now, "assignee", asgn, assignee)?;
+    let tb = task.target_branch.as_deref().unwrap_or("");
+    apply_field_update(conn, id, actor, now, "target_branch", tb, target_branch)?;
     Ok(())
 }
 
@@ -494,7 +525,7 @@ fn apply_field_update(
 }
 
 fn build_list_query(status: Option<&str>, assignee: Option<&str>) -> (String, Vec<String>) {
-    let mut sql = "SELECT id, title, description, status, priority, assignee, created_at, updated_at FROM tasks".to_string();
+    let mut sql = "SELECT id, title, description, status, priority, assignee, target_branch, created_at, updated_at FROM tasks".to_string();
     let mut conditions = Vec::new();
     let mut params = Vec::new();
     if let Some(s) = status {
@@ -529,8 +560,9 @@ fn row_to_task(row: &rusqlite::Row) -> Task {
         status: row.get(3).unwrap_or_default(),
         priority: row.get::<_, i32>(4).unwrap_or(0) as u8,
         assignee: row.get(5).ok(),
-        created_at: row.get(6).unwrap_or_default(),
-        updated_at: row.get(7).unwrap_or_default(),
+        target_branch: row.get(6).ok(),
+        created_at: row.get(7).unwrap_or_default(),
+        updated_at: row.get(8).unwrap_or_default(),
     }
 }
 
