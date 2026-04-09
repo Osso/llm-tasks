@@ -131,7 +131,12 @@ async fn update_changes_fields() {
 
     db.update_task(
         &task.id,
-        TaskUpdates { priority: Some(3), title: Some("Renamed"), description: Some("New desc"), ..Default::default() },
+        TaskUpdates {
+            priority: Some(3),
+            title: Some("Renamed"),
+            description: Some("New desc"),
+            ..Default::default()
+        },
         "a",
     )
     .await
@@ -148,9 +153,18 @@ async fn update_skips_unchanged_fields() {
     let (db, _dir) = temp_db().await;
     let task = db.create_task("Same", None, 1, "a").await.unwrap();
 
-    db.update_task(&task.id, TaskUpdates { status: Some("pending"), priority: Some(1), title: Some("Same"), ..Default::default() }, "a")
-        .await
-        .unwrap();
+    db.update_task(
+        &task.id,
+        TaskUpdates {
+            status: Some("pending"),
+            priority: Some(1),
+            title: Some("Same"),
+            ..Default::default()
+        },
+        "a",
+    )
+    .await
+    .unwrap();
 
     let events = db.get_events(&task.id).await.unwrap();
     assert_eq!(events.len(), 1);
@@ -296,9 +310,17 @@ async fn events_track_field_updates() {
     let (db, _dir) = temp_db().await;
     let task = db.create_task("Before", None, 1, "a").await.unwrap();
 
-    db.update_task(&task.id, TaskUpdates { priority: Some(3), title: Some("After"), ..Default::default() }, "editor")
-        .await
-        .unwrap();
+    db.update_task(
+        &task.id,
+        TaskUpdates {
+            priority: Some(3),
+            title: Some("After"),
+            ..Default::default()
+        },
+        "editor",
+    )
+    .await
+    .unwrap();
 
     let events = db.get_events(&task.id).await.unwrap();
     assert_eq!(events.len(), 3); // created + priority + title
@@ -323,8 +345,14 @@ async fn add_and_get_comments() {
     let (db, _dir) = temp_db().await;
     let task = db.create_task("Commentable", None, 0, "a").await.unwrap();
 
-    let c1 = db.add_comment(&task.id, "dev-0", "Blocked: need API key").await.unwrap();
-    let c2 = db.add_comment(&task.id, "manager", "Use env var SECRET_KEY").await.unwrap();
+    let c1 = db
+        .add_comment(&task.id, "dev-0", "Blocked: need API key")
+        .await
+        .unwrap();
+    let c2 = db
+        .add_comment(&task.id, "manager", "Use env var SECRET_KEY")
+        .await
+        .unwrap();
 
     assert_eq!(c1.actor, "dev-0");
     assert_eq!(c1.content, "Blocked: need API key");
@@ -351,7 +379,10 @@ async fn clear_assignee_sets_null() {
     let task = db.create_task("Assigned", None, 0, "a").await.unwrap();
     db.claim_task(&task.id, "dev-0").await.unwrap();
 
-    assert_eq!(db.get_task(&task.id).await.unwrap().assignee.as_deref(), Some("dev-0"));
+    assert_eq!(
+        db.get_task(&task.id).await.unwrap().assignee.as_deref(),
+        Some("dev-0")
+    );
 
     db.clear_assignee(&task.id, "runtime").await.unwrap();
     let updated = db.get_task(&task.id).await.unwrap();
@@ -365,7 +396,10 @@ async fn clear_assignee_makes_task_ready_dispatchable() {
     db.claim_task(&task.id, "dev-0").await.unwrap();
 
     // Set back to ready but assignee still set
-    let updates = TaskUpdates { status: Some("ready"), ..Default::default() };
+    let updates = TaskUpdates {
+        status: Some("ready"),
+        ..Default::default()
+    };
     db.update_task(&task.id, updates, "runtime").await.unwrap();
 
     // ready_tasks requires assignee IS NULL — should NOT find it yet

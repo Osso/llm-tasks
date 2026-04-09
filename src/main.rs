@@ -1,6 +1,12 @@
 use llm_tasks::cli::{Cli, Command, DepCommand};
 use llm_tasks::db::{Database, Dependency, Event, Task, TaskUpdates};
 
+struct CommandContext<'a> {
+    db: &'a Database,
+    actor: &'a str,
+    json: bool,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = <Cli as clap::Parser>::parse();
@@ -9,29 +15,96 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn dispatch(cli: Cli, db: &Database) -> anyhow::Result<()> {
+    let db_path = cli.db_path();
     let actor = cli.actor();
-    let json = cli.json;
-    match cli.command {
-        Command::Init => println!("Database initialized at {}", cli.db_path().display()),
-        Command::Create { title, description, priority } => {
-            cmd_create(db, &title, description.as_deref(), priority, &actor, json).await?
+    let context = CommandContext {
+        db,
+        actor: &actor,
+        json: cli.json,
+    };
+
+    if is_core_command(&cli.command) {
+        handle_core_command(cli.command, &db_path, &context).await?;
+    } else {
+        handle_task_command(cli.command, &context).await?;
+    }
+
+    Ok(())
+}
+
+fn is_core_command(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Init | Command::Create { .. } | Command::List { .. } | Command::Ready
+    )
+}
+
+async fn handle_core_command(
+    command: Command,
+    db_path: &std::path::Path,
+    context: &CommandContext<'_>,
+) -> anyhow::Result<()> {
+    match command {
+        Command::Init => println!("Database initialized at {}", db_path.display()),
+        Command::Create {
+            title,
+            description,
+            priority,
+        } => {
+            cmd_create(
+                context.db,
+                &title,
+                description.as_deref(),
+                priority,
+                context.actor,
+                context.json,
+            )
+            .await?
         }
         Command::List { status, assignee } => {
-            cmd_list(db, status.as_deref(), assignee.as_deref(), json).await?
+            cmd_list(
+                context.db,
+                status.as_deref(),
+                assignee.as_deref(),
+                context.json,
+            )
+            .await?
         }
-        Command::Ready => cmd_ready(db, json).await?,
-        Command::Show { id } => cmd_show(db, &id, json).await?,
-        Command::Claim { id } => cmd_claim(db, &id, &actor).await?,
-        Command::Update { id, status, priority, title, description } => {
-            let s = status.as_deref();
-            let t = title.as_deref();
-            let d = description.as_deref();
-            cmd_update(db, &id, s, priority, t, d, &actor).await?
+        Command::Ready => cmd_ready(context.db, context.json).await?,
+        _ => unreachable!("core command router received a task command"),
+    }
+    Ok(())
+}
+
+async fn handle_task_command(command: Command, context: &CommandContext<'_>) -> anyhow::Result<()> {
+    match command {
+        Command::Show { id } => cmd_show(context.db, &id, context.json).await?,
+        Command::Claim { id } => cmd_claim(context.db, &id, context.actor).await?,
+        Command::Update {
+            id,
+            status,
+            priority,
+            title,
+            description,
+        } => {
+            cmd_update(
+                context.db,
+                &id,
+                status.as_deref(),
+                priority,
+                title.as_deref(),
+                description.as_deref(),
+                context.actor,
+            )
+            .await?
         }
-        Command::Close { id } => cmd_close(db, &id, &actor).await?,
-        Command::Comment { id, content } => cmd_comment(db, &id, &content, &actor, json).await?,
-        Command::Dep { command } => cmd_dep(db, command).await?,
-        Command::History { id } => cmd_history(db, &id, json).await?,
+        Command::Close { id } => cmd_close(context.db, &id, context.actor).await?,
+        Command::Comment { id, content } => {
+            cmd_comment(context.db, &id, &content, context.actor, context.json).await?
+        }
+        Command::Dep { command } => cmd_dep(context.db, command).await?,
+        Command::History { id } => cmd_history(context.db, &id, context.json).await?,
+        _ => unreachable!("task command router received a core command"),
     }
     Ok(())
 }
@@ -120,7 +193,13 @@ async fn cmd_update(
     desc: Option<&str>,
     actor: &str,
 ) -> anyhow::Result<()> {
-    let updates = TaskUpdates { status, priority, title, description: desc, ..Default::default() };
+    let updates = TaskUpdates {
+        status,
+        priority,
+        title,
+        description: desc,
+        ..Default::default()
+    };
     db.update_task(id, updates, actor).await?;
     println!("Updated {}", id);
     Ok(())
@@ -146,7 +225,13 @@ async fn cmd_dep(db: &Database, command: DepCommand) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_comment(db: &Database, id: &str, content: &str, actor: &str, json: bool) -> anyhow::Result<()> {
+async fn cmd_comment(
+    db: &Database,
+    id: &str,
+    content: &str,
+    actor: &str,
+    json: bool,
+) -> anyhow::Result<()> {
     let comment = db.add_comment(id, actor, content).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&comment)?);

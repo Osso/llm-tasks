@@ -74,7 +74,9 @@ impl Database {
             Ok(conn)
         })
         .await??;
-        Ok(Self { conn: Arc::new(Mutex::new(conn)) })
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
     }
 
     pub async fn create_task(
@@ -84,7 +86,8 @@ impl Database {
         priority: u8,
         actor: &str,
     ) -> Result<Task> {
-        self.create_task_with_branch(title, desc, priority, actor, None).await
+        self.create_task_with_branch(title, desc, priority, actor, None)
+            .await
     }
 
     pub async fn create_task_with_branch(
@@ -140,8 +143,10 @@ impl Database {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let c = conn.lock().unwrap();
-            let params: Vec<&dyn rusqlite::types::ToSql> =
-                param_values.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+            let params: Vec<&dyn rusqlite::types::ToSql> = param_values
+                .iter()
+                .map(|s| s as &dyn rusqlite::types::ToSql)
+                .collect();
             let mut stmt = c.prepare(&sql)?;
             let mut rows = stmt.query(params.as_slice())?;
             collect_tasks(&mut rows)
@@ -191,12 +196,7 @@ impl Database {
         Ok(())
     }
 
-    pub async fn update_task(
-        &self,
-        id: &str,
-        updates: TaskUpdates<'_>,
-        actor: &str,
-    ) -> Result<()> {
+    pub async fn update_task(&self, id: &str, updates: TaskUpdates<'_>, actor: &str) -> Result<()> {
         let task = self.get_task(id).await?;
         let now = now_iso();
         let conn = self.conn.clone();
@@ -211,9 +211,16 @@ impl Database {
         tokio::task::spawn_blocking(move || {
             let c = conn.lock().unwrap();
             apply_task_fields(
-                &c, &id, &actor, &now, &task,
-                status.as_deref(), priority, title.as_deref(),
-                description.as_deref(), assignee.as_deref(),
+                &c,
+                &id,
+                &actor,
+                &now,
+                &task,
+                status.as_deref(),
+                priority,
+                title.as_deref(),
+                description.as_deref(),
+                assignee.as_deref(),
                 target_branch.as_deref(),
             )
         })
@@ -291,7 +298,15 @@ impl Database {
                 "UPDATE tasks SET status = 'completed', updated_at = ?1 WHERE id = ?2",
                 params![&now, &id],
             )?;
-            record_event(&c, &id, &actor, "closed", Some("status"), Some(&task.status), Some("completed"))?;
+            record_event(
+                &c,
+                &id,
+                &actor,
+                "closed",
+                Some("status"),
+                Some(&task.status),
+                Some("completed"),
+            )?;
             Ok(())
         })
         .await??;
@@ -328,7 +343,10 @@ impl Database {
         tokio::task::spawn_blocking(move || -> Result<()> {
             let c = conn.lock().unwrap();
             c.execute("DELETE FROM events WHERE task_id = ?1", params![&id])?;
-            c.execute("DELETE FROM dependencies WHERE task_id = ?1 OR depends_on = ?1", params![&id])?;
+            c.execute(
+                "DELETE FROM dependencies WHERE task_id = ?1 OR depends_on = ?1",
+                params![&id],
+            )?;
             c.execute("DELETE FROM tasks WHERE id = ?1", params![&id])?;
             Ok(())
         })
@@ -353,41 +371,29 @@ impl Database {
     }
 
     pub async fn get_dependencies(&self, task_id: &str) -> Result<Vec<Dependency>> {
-        let conn = self.conn.clone();
-        let task_id = task_id.to_string();
-        tokio::task::spawn_blocking(move || {
-            let c = conn.lock().unwrap();
-            let mut stmt = c.prepare(
-                "SELECT task_id, depends_on, dep_type FROM dependencies WHERE task_id = ?1",
-            )?;
-            let rows = stmt.query_map(params![&task_id], |row| {
-                Ok(Dependency {
-                    task_id: row.get(0)?,
-                    depends_on: row.get(1)?,
-                    dep_type: row.get(2)?,
-                })
-            })?;
-            rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
-        })
-        .await?
+        self.query_dependencies(task_id, DependencyColumn::TaskId)
+            .await
     }
 
     pub async fn get_reverse_dependencies(&self, task_id: &str) -> Result<Vec<Dependency>> {
+        self.query_dependencies(task_id, DependencyColumn::DependsOn)
+            .await
+    }
+
+    async fn query_dependencies(
+        &self,
+        task_id: &str,
+        column: DependencyColumn,
+    ) -> Result<Vec<Dependency>> {
         let conn = self.conn.clone();
         let task_id = task_id.to_string();
+        let sql = column.select_sql();
         tokio::task::spawn_blocking(move || {
             let c = conn.lock().unwrap();
-            let mut stmt = c.prepare(
-                "SELECT task_id, depends_on, dep_type FROM dependencies WHERE depends_on = ?1",
-            )?;
-            let rows = stmt.query_map(params![&task_id], |row| {
-                Ok(Dependency {
-                    task_id: row.get(0)?,
-                    depends_on: row.get(1)?,
-                    dep_type: row.get(2)?,
-                })
-            })?;
-            rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+            let mut stmt = c.prepare(sql)?;
+            let rows = stmt.query_map(params![&task_id], row_to_dependency)?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Into::into)
         })
         .await?
     }
@@ -518,9 +524,21 @@ fn apply_field_update(
         field
     );
     // Empty string means "clear the field" → store as NULL
-    let db_val: Option<&str> = if new_val.is_empty() { None } else { Some(new_val) };
+    let db_val: Option<&str> = if new_val.is_empty() {
+        None
+    } else {
+        Some(new_val)
+    };
     conn.execute(&sql, params![db_val, now, id])?;
-    record_event(conn, id, actor, "updated", Some(field), Some(old), Some(new_val))?;
+    record_event(
+        conn,
+        id,
+        actor,
+        "updated",
+        Some(field),
+        Some(old),
+        Some(new_val),
+    )?;
     Ok(())
 }
 
@@ -552,6 +570,14 @@ fn collect_tasks(rows: &mut rusqlite::Rows) -> Result<Vec<Task>> {
     Ok(tasks)
 }
 
+fn row_to_dependency(row: &rusqlite::Row) -> rusqlite::Result<Dependency> {
+    Ok(Dependency {
+        task_id: row.get(0)?,
+        depends_on: row.get(1)?,
+        dep_type: row.get(2)?,
+    })
+}
+
 fn row_to_task(row: &rusqlite::Row) -> Task {
     Task {
         id: row.get(0).unwrap_or_default(),
@@ -568,4 +594,23 @@ fn row_to_task(row: &rusqlite::Row) -> Task {
 
 fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+#[derive(Clone, Copy)]
+enum DependencyColumn {
+    TaskId,
+    DependsOn,
+}
+
+impl DependencyColumn {
+    fn select_sql(self) -> &'static str {
+        match self {
+            Self::TaskId => {
+                "SELECT task_id, depends_on, dep_type FROM dependencies WHERE task_id = ?1"
+            }
+            Self::DependsOn => {
+                "SELECT task_id, depends_on, dep_type FROM dependencies WHERE depends_on = ?1"
+            }
+        }
+    }
 }
