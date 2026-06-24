@@ -9,6 +9,16 @@ async fn temp_db() -> (Database, TempDir) {
 }
 
 #[tokio::test]
+async fn open_creates_parent_directories() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("nested").join("state").join("tasks.db");
+
+    let _db = Database::open(&path).await.unwrap();
+
+    assert!(path.exists());
+}
+
+#[tokio::test]
 async fn create_task_returns_pending() {
     let (db, _dir) = temp_db().await;
     let task = db
@@ -80,6 +90,30 @@ async fn list_tasks_filter_by_assignee() {
 }
 
 #[tokio::test]
+async fn list_tasks_filters_by_status_and_assignee() {
+    let (db, _dir) = temp_db().await;
+    let matching = db.create_task("Matching", None, 0, "a").await.unwrap();
+    let wrong_assignee = db
+        .create_task("Wrong assignee", None, 0, "a")
+        .await
+        .unwrap();
+    let wrong_status = db.create_task("Wrong status", None, 0, "a").await.unwrap();
+
+    db.claim_task(&matching.id, "dev-0").await.unwrap();
+    db.claim_task(&wrong_assignee.id, "dev-1").await.unwrap();
+    db.claim_task(&wrong_status.id, "dev-0").await.unwrap();
+    db.close_task(&wrong_status.id, "dev-0").await.unwrap();
+
+    let tasks = db
+        .list_tasks(Some("in_progress"), Some("dev-0"))
+        .await
+        .unwrap();
+
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].id, matching.id);
+}
+
+#[tokio::test]
 async fn claim_sets_assignee_and_in_progress() {
     let (db, _dir) = temp_db().await;
     let task = db.create_task("Claimable", None, 0, "a").await.unwrap();
@@ -101,6 +135,31 @@ async fn claim_rejects_already_claimed() {
 
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("Cannot claim"));
+}
+
+#[tokio::test]
+async fn claim_rejects_ready_task_with_assignee() {
+    let (db, _dir) = temp_db().await;
+    let task = db.create_task("Race", None, 0, "a").await.unwrap();
+    db.claim_task(&task.id, "dev-0").await.unwrap();
+    db.update_task(
+        &task.id,
+        TaskUpdates {
+            status: Some("ready"),
+            ..Default::default()
+        },
+        "runtime",
+    )
+    .await
+    .unwrap();
+
+    let err = db
+        .claim_task(&task.id, "dev-1")
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("already assigned to dev-0"));
 }
 
 #[tokio::test]
@@ -146,6 +205,33 @@ async fn update_changes_fields() {
     assert_eq!(updated.title, "Renamed");
     assert_eq!(updated.description.as_deref(), Some("New desc"));
     assert_eq!(updated.priority, 3);
+}
+
+#[tokio::test]
+async fn update_empty_optional_fields_clears_to_null() {
+    let (db, _dir) = temp_db().await;
+    let task = db
+        .create_task_with_branch("Original", Some("desc"), 1, "a", Some("feature"))
+        .await
+        .unwrap();
+
+    db.update_task(
+        &task.id,
+        TaskUpdates {
+            description: Some(""),
+            assignee: Some(""),
+            target_branch: Some(""),
+            ..Default::default()
+        },
+        "a",
+    )
+    .await
+    .unwrap();
+
+    let updated = db.get_task(&task.id).await.unwrap();
+    assert!(updated.description.is_none());
+    assert!(updated.assignee.is_none());
+    assert!(updated.target_branch.is_none());
 }
 
 #[tokio::test]
@@ -290,6 +376,45 @@ async fn get_dependencies_returns_deps() {
 }
 
 #[tokio::test]
+async fn get_reverse_dependencies_returns_dependents() {
+    let (db, _dir) = temp_db().await;
+    let blocker = db.create_task("A", None, 0, "x").await.unwrap();
+    let dependent = db.create_task("B", None, 0, "x").await.unwrap();
+
+    db.add_dependency(&dependent.id, &blocker.id, "blocks")
+        .await
+        .unwrap();
+
+    let deps = db.get_reverse_dependencies(&blocker.id).await.unwrap();
+    assert_eq!(deps.len(), 1);
+    assert_eq!(deps[0].task_id, dependent.id);
+    assert_eq!(deps[0].depends_on, blocker.id);
+}
+
+#[tokio::test]
+async fn delete_task_removes_related_rows() {
+    let (db, _dir) = temp_db().await;
+    let blocker = db.create_task("A", None, 0, "x").await.unwrap();
+    let dependent = db.create_task("B", None, 0, "x").await.unwrap();
+
+    db.add_dependency(&dependent.id, &blocker.id, "blocks")
+        .await
+        .unwrap();
+    db.add_comment(&blocker.id, "x", "note").await.unwrap();
+    db.delete_task(&blocker.id).await.unwrap();
+
+    assert!(db.get_task(&blocker.id).await.is_err());
+    assert!(
+        db.get_reverse_dependencies(&blocker.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(db.get_dependencies(&dependent.id).await.unwrap().is_empty());
+    assert!(db.get_events(&blocker.id).await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn events_track_full_lifecycle() {
     let (db, _dir) = temp_db().await;
     let task = db.create_task("Tracked", None, 1, "creator").await.unwrap();
@@ -410,4 +535,46 @@ async fn clear_assignee_makes_task_ready_dispatchable() {
     db.clear_assignee(&task.id, "runtime").await.unwrap();
     let ready = db.ready_tasks().await.unwrap();
     assert!(ready.iter().any(|t| t.id == task.id));
+}
+
+#[tokio::test]
+async fn open_migrates_database_without_target_branch() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("legacy.db");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE tasks (
+                id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT,
+                status TEXT NOT NULL DEFAULT 'pending', priority INTEGER NOT NULL DEFAULT 0,
+                assignee TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE dependencies (
+                task_id TEXT NOT NULL REFERENCES tasks(id),
+                depends_on TEXT NOT NULL REFERENCES tasks(id),
+                dep_type TEXT NOT NULL DEFAULT 'blocks',
+                PRIMARY KEY (task_id, depends_on)
+            );
+            CREATE TABLE events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL,
+                actor TEXT NOT NULL, action TEXT NOT NULL, field TEXT,
+                old_value TEXT, new_value TEXT, timestamp TEXT NOT NULL
+            );
+            CREATE TABLE comments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL REFERENCES tasks(id),
+                actor TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL
+            );
+            ",
+        )
+        .unwrap();
+    }
+
+    let db = Database::open(&path).await.unwrap();
+    let task = db
+        .create_task_with_branch("Migrated", None, 0, "agent", Some("branch"))
+        .await
+        .unwrap();
+
+    assert_eq!(task.target_branch.as_deref(), Some("branch"));
 }

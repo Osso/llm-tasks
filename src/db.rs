@@ -343,6 +343,7 @@ impl Database {
         tokio::task::spawn_blocking(move || -> Result<()> {
             let c = conn.lock().unwrap();
             c.execute("DELETE FROM events WHERE task_id = ?1", params![&id])?;
+            c.execute("DELETE FROM comments WHERE task_id = ?1", params![&id])?;
             c.execute(
                 "DELETE FROM dependencies WHERE task_id = ?1 OR depends_on = ?1",
                 params![&id],
