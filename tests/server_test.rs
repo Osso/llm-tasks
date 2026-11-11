@@ -10,7 +10,9 @@ const TOKEN: &str = "test-secret";
 async fn start_server() -> (String, reqwest::Client, TempDir) {
     let dir = TempDir::new().unwrap();
     let db = Database::open(&dir.path().join("tasks.db")).await.unwrap();
-    let app = server::router(db, vec![TOKEN.to_owned()]);
+    let rules = dir.path().join("rules.md");
+    std::fs::write(&rules, "# Rules\n\nClaim before working.\n").unwrap();
+    let app = server::router(db, vec![TOKEN.to_owned()], Some(rules));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -292,4 +294,59 @@ async fn token_file_requires_nonblank_tokens() {
         server::load_tokens(&valid).unwrap(),
         ["first-token", "second-token"]
     );
+}
+
+#[tokio::test]
+async fn rules_require_auth_and_reflect_file_edits() {
+    let (base, client, dir) = start_server().await;
+    let no_token = client.get(format!("{base}/rules")).send().await.unwrap();
+    assert_eq!(no_token.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let first = request(&client, reqwest::Method::GET, format!("{base}/rules"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        first.headers()["content-type"],
+        "text/markdown; charset=utf-8"
+    );
+    assert_eq!(
+        first.text().await.unwrap(),
+        "# Rules\n\nClaim before working.\n"
+    );
+
+    std::fs::write(
+        dir.path().join("rules.md"),
+        "# Rules\n\nComment progress.\n",
+    )
+    .unwrap();
+    let edited = request(&client, reqwest::Method::GET, format!("{base}/rules"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        edited.text().await.unwrap(),
+        "# Rules\n\nComment progress.\n"
+    );
+}
+
+#[tokio::test]
+async fn rules_are_404_when_not_configured() {
+    let dir = TempDir::new().unwrap();
+    let db = Database::open(&dir.path().join("tasks.db")).await.unwrap();
+    let app = server::router(db, vec![TOKEN.to_owned()], None);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = reqwest::Client::new();
+    let response = request(
+        &client,
+        reqwest::Method::GET,
+        format!("http://{addr}/rules"),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
 }

@@ -1,6 +1,10 @@
 //! `lt serve`: the HTTP API in docs/specs/http-api.md over a local `Database`.
 
-use std::{net::SocketAddr, path::Path, sync::Arc};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use axum::{
     Json, Router,
@@ -20,15 +24,18 @@ use crate::db::{Conflict, Database, NotFound, TaskUpdates};
 struct AppState {
     db: Arc<Database>,
     tokens: Arc<Vec<String>>,
+    rules_file: Option<Arc<PathBuf>>,
 }
 
-pub fn router(db: Database, tokens: Vec<String>) -> Router {
+pub fn router(db: Database, tokens: Vec<String>, rules_file: Option<PathBuf>) -> Router {
     let state = AppState {
         db: Arc::new(db),
         tokens: Arc::new(tokens),
+        rules_file: rules_file.map(Arc::new),
     };
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/rules", get(rules))
         .route("/tasks", post(create_task).get(list_tasks))
         .route("/tasks/ready", get(ready_tasks))
         .route("/tasks/{id}", get(get_task).patch(update_task))
@@ -60,10 +67,15 @@ pub fn load_tokens(path: &Path) -> anyhow::Result<Vec<String>> {
     Ok(tokens)
 }
 
-pub async fn serve(db: Database, addr: SocketAddr, token_file: &Path) -> anyhow::Result<()> {
+pub async fn serve(
+    db: Database,
+    addr: SocketAddr,
+    token_file: &Path,
+    rules_file: Option<PathBuf>,
+) -> anyhow::Result<()> {
     let tokens = load_tokens(token_file)?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, router(db, tokens))
+    axum::serve(listener, router(db, tokens, rules_file))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
@@ -159,6 +171,17 @@ fn error_response(error: anyhow::Error) -> Response {
 
 async fn healthz() -> &'static str {
     "ok"
+}
+
+/// Agent rules as markdown, read per request so edits apply without a restart.
+async fn rules(State(state): State<AppState>) -> Response {
+    let Some(path) = state.rules_file else {
+        return error_response(NotFound("rules not configured".to_owned()).into());
+    };
+    match std::fs::read_to_string(path.as_path()) {
+        Ok(text) => ([("content-type", "text/markdown; charset=utf-8")], text).into_response(),
+        Err(error) => error_response(anyhow::anyhow!("reading rules file: {error}")),
+    }
 }
 
 #[derive(Deserialize)]

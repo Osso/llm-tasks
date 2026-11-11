@@ -13,9 +13,14 @@ struct CommandContext<'a, S> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = <Cli as clap::Parser>::parse();
-    if let Command::Serve { addr, token_file } = &cli.command {
+    if let Command::Serve {
+        addr,
+        token_file,
+        rules_file,
+    } = &cli.command
+    {
         let db = Database::open(&cli.db_path()).await?;
-        return server::serve(db, *addr, token_file).await;
+        return server::serve(db, *addr, token_file, rules_file.clone()).await;
     }
     match std::env::var("LT_URL") {
         Ok(url) => {

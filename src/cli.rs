@@ -137,6 +137,9 @@ pub enum Command {
         /// File with one accepted bearer token per line
         #[arg(long)]
         token_file: PathBuf,
+        /// Markdown served at GET /rules (404 when unset)
+        #[arg(long)]
+        rules_file: Option<PathBuf>,
     },
 }
 
