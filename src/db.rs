@@ -294,6 +294,7 @@ impl Database {
                 params![&task_id, &actor, &content, &now],
             )?;
             let id = c.last_insert_rowid();
+            record_event(&c, &task_id, &actor, "commented", None, None, Some(&id.to_string()))?;
             Ok(Comment { id, task_id, actor, content, created_at: now })
         })
         .await?
@@ -434,24 +435,25 @@ impl Database {
         .await?
     }
 
+    /// Events on all tasks with `id > after`, oldest first: a cursor feed for watchers.
+    pub async fn events_after(&self, after: i64) -> Result<Vec<Event>> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let c = conn.lock().unwrap();
+            let mut stmt = c.prepare("SELECT id, task_id, actor, action, field, old_value, new_value, timestamp FROM events WHERE id > ?1 ORDER BY id ASC")?;
+            let rows = stmt.query_map(params![after], event_from_row)?;
+            rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        })
+        .await?
+    }
+
     pub async fn get_events(&self, task_id: &str) -> Result<Vec<Event>> {
         let conn = self.conn.clone();
         let task_id = task_id.to_string();
         tokio::task::spawn_blocking(move || {
             let c = conn.lock().unwrap();
             let mut stmt = c.prepare("SELECT id, task_id, actor, action, field, old_value, new_value, timestamp FROM events WHERE task_id = ?1 ORDER BY id ASC")?;
-            let rows = stmt.query_map(params![&task_id], |row| {
-                Ok(Event {
-                    id: row.get(0)?,
-                    task_id: row.get(1)?,
-                    actor: row.get(2)?,
-                    action: row.get(3)?,
-                    field: row.get(4)?,
-                    old_value: row.get(5)?,
-                    new_value: row.get(6)?,
-                    timestamp: row.get(7)?,
-                })
-            })?;
+            let rows = stmt.query_map(params![&task_id], event_from_row)?;
             rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
         })
         .await?
@@ -496,6 +498,19 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch("ALTER TABLE tasks ADD COLUMN target_branch TEXT")?;
     }
     Ok(())
+}
+
+fn event_from_row(row: &rusqlite::Row) -> rusqlite::Result<Event> {
+    Ok(Event {
+        id: row.get(0)?,
+        task_id: row.get(1)?,
+        actor: row.get(2)?,
+        action: row.get(3)?,
+        field: row.get(4)?,
+        old_value: row.get(5)?,
+        new_value: row.get(6)?,
+        timestamp: row.get(7)?,
+    })
 }
 
 fn record_event(

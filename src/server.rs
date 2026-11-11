@@ -36,6 +36,7 @@ pub fn router(db: Database, tokens: Vec<String>, rules_file: Option<PathBuf>) ->
     Router::new()
         .route("/healthz", get(healthz))
         .route("/rules", get(rules))
+        .route("/events", get(events_after))
         .route("/tasks", post(create_task).get(list_tasks))
         .route("/tasks/ready", get(ready_tasks))
         .route("/tasks/{id}", get(get_task).patch(update_task))
@@ -343,6 +344,18 @@ async fn add_comment(
             .add_comment(&id, actor(&headers), &body.content)
             .await,
         StatusCode::CREATED,
+    )
+}
+
+#[derive(Deserialize)]
+struct EventsAfter {
+    after: Option<i64>,
+}
+
+async fn events_after(State(state): State<AppState>, Query(query): Query<EventsAfter>) -> Response {
+    result_response(
+        state.db.events_after(query.after.unwrap_or(0)).await,
+        StatusCode::OK,
     )
 }
 

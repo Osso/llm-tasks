@@ -350,3 +350,70 @@ async fn rules_are_404_when_not_configured() {
     .unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn events_feed_returns_other_tasks_and_comments_after_cursor() {
+    let (base, client, _dir) = start_server().await;
+    let first = create(&client, &base, "first").await;
+    let first_id = first["id"].as_str().unwrap();
+    let start: Vec<Value> = request(&client, reqwest::Method::GET, format!("{base}/events"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let cursor = start.last().unwrap()["id"].as_i64().unwrap();
+
+    let second = create(&client, &base, "second").await;
+    let second_id = second["id"].as_str().unwrap();
+    request(
+        &client,
+        reqwest::Method::POST,
+        format!("{base}/tasks/{first_id}/comments"),
+    )
+    .header("X-LT-Actor", "dot-wow-ui-sim")
+    .json(&json!({"content": "QUESTION: which build?"}))
+    .send()
+    .await
+    .unwrap()
+    .error_for_status()
+    .unwrap();
+
+    let after: Vec<Value> = request(
+        &client,
+        reqwest::Method::GET,
+        format!("{base}/events?after={cursor}"),
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let seen: Vec<(&str, &str, &str)> = after
+        .iter()
+        .map(|event| {
+            (
+                event["task_id"].as_str().unwrap(),
+                event["action"].as_str().unwrap(),
+                event["actor"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        vec![
+            (second_id, "created", "unknown"),
+            (first_id, "commented", "dot-wow-ui-sim"),
+        ]
+    );
+    assert!(
+        after
+            .iter()
+            .all(|event| event["id"].as_i64().unwrap() > cursor)
+    );
+
+    let no_token = client.get(format!("{base}/events")).send().await.unwrap();
+    assert_eq!(no_token.status(), reqwest::StatusCode::UNAUTHORIZED);
+}

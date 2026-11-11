@@ -9,6 +9,7 @@ is set; every command behaves the same as in local mode.
 - [x] `lt serve --addr <ip:port> --token-file <path> [--db <path>]` binds the given address (default `127.0.0.1:8095`). TLS is out of scope; publish through a TLS-terminating proxy (Cloudflare tunnel).
 - [x] Token file: one accepted bearer token per line; blank lines ignored. Startup fails when the file is missing or holds no token. The file is read at startup.
 - [x] `--rules-file <path>` (optional): `GET /rules` returns that file as `text/markdown`, read on every request so edits apply without a restart. Without the flag it returns 404. Agents that cannot read host rule files (OpenAI dots) fetch their coordination rules here.
+- [x] `GET /events?after=<id>` returns events on all tasks with `id > after` (default 0), oldest first, so a watcher can follow the tracker with one cursor. Adding a comment records a `commented` event whose `new_value` is the comment id.
 - [x] Every route except `GET /healthz` requires `Authorization: Bearer <token>`; a missing or unknown token returns 401 before any database access. Token comparison is constant-time.
 - [x] The actor for the audit trail comes from the `X-LT-Actor` header (default `unknown`). It is caller-asserted, not authenticated.
 - [x] Concurrent claims of one task over HTTP produce exactly one 204; every other claimer gets 409.
@@ -22,6 +23,7 @@ All bodies are JSON. Errors are `{"error": "<message>"}`.
 | Method | Path | Body | Success | `TaskStore` method |
 |---|---|---|---|---|
 | GET | `/healthz` | — | 200 `"ok"` (no auth) | — |
+| GET | `/events?after=` | — | 200 `[Event]` | — (`Database::events_after`) |
 | GET | `/rules` | — | 200 markdown text (404 when unconfigured) | — |
 | POST | `/tasks` | `{"title", "description"?, "priority"?}` | 201 `Task` | `create_task` |
 | GET | `/tasks?status=&assignee=` | — | 200 `[Task]` | `list_tasks` |
@@ -51,7 +53,11 @@ All bodies are JSON. Errors are `{"error": "<message>"}`.
 ## Tests asserting this spec
 
 - `tests/db_test.rs`: atomic claim (concurrent claimers, one winner, one event pair).
-- `tests/server_test.rs`: auth, routes, error mapping, concurrent HTTP claims, `/rules` auth, live file edits and 404 when unconfigured.
+- `tests/server_test.rs`: auth, routes, error mapping, concurrent HTTP claims, `/rules` auth, live file edits and 404 when unconfigured, `/events` cursor feed.
+
+## Watcher
+
+`pi-extension/lt-watch.ts` is a Pi extension that polls `/events` and wakes a session only when another actor changes the tracker. It is enabled per Pi session in `~/.config/llm-tasks/watch.json`; the file header documents the format. Install it by copying it to `~/.config/pi/agent/extensions/`.
 - `tests/remote_test.rs`: `HttpStore` request shapes and 404/409/500 mapping against a stub server.
 - `tests/cli_remote_test.rs`: a real `lt serve` process and `lt` clients in `LT_URL` mode: round trip, single claim winner, 401, 404.
 
