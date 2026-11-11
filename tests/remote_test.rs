@@ -76,8 +76,8 @@ async fn record_request(State(state): State<StubState>, request: Request<Body>) 
         }
         path if path.ends_with("/dependencies") && parts.method == "GET" => (200, json!([])),
         path if path.ends_with("/events") => (200, json!([])),
-        path if path.starts_with("/tasks/") && parts.method == "GET" => (200, task_json()),
         path if path == "/tasks" || path == "/tasks/ready" => (200, json!([task_json()])),
+        path if path.starts_with("/tasks/") && parts.method == "GET" => (200, task_json()),
         _ => (204, Value::Null),
     };
     let mut response = Response::new(Body::from(if status == 204 {
