@@ -7,10 +7,10 @@ is set; every command behaves the same as in local mode.
 ## What it must do
 
 - [ ] `lt serve --addr <ip:port> --token-file <path> [--db <path>]` binds the given address (default `127.0.0.1:8095`). TLS is out of scope; publish through a TLS-terminating proxy (Cloudflare tunnel).
-- [ ] Token file: one accepted bearer token per line; blank lines ignored. Startup fails when the file is missing or holds no token. The file is read at startup.
-- [ ] Every route except `GET /healthz` requires `Authorization: Bearer <token>`; a missing or unknown token returns 401 before any database access. Token comparison is constant-time.
-- [ ] The actor for the audit trail comes from the `X-LT-Actor` header (default `unknown`). It is caller-asserted, not authenticated.
-- [ ] Concurrent claims of one task over HTTP produce exactly one 200; every other claimer gets 409.
+- [x] Token file: one accepted bearer token per line; blank lines ignored. Startup fails when the file is missing or holds no token. The file is read at startup.
+- [x] Every route except `GET /healthz` requires `Authorization: Bearer <token>`; a missing or unknown token returns 401 before any database access. Token comparison is constant-time.
+- [x] The actor for the audit trail comes from the `X-LT-Actor` header (default `unknown`). It is caller-asserted, not authenticated.
+- [x] Concurrent claims of one task over HTTP produce exactly one 204; every other claimer gets 409.
 - [x] A claim is one conditional `UPDATE` in an immediate transaction; events are recorded only for the winning claim.
 - [ ] Client mode: `LT_URL` (base URL, no trailing slash needed) + `LT_TOKEN` (required when `LT_URL` is set). Responses 404 and 409 map back to `db::NotFound` / `db::Conflict` with the server's message, so CLI output matches local mode. Other non-2xx statuses fail with the status and the server's `error` message.
 
