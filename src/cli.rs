@@ -128,6 +128,16 @@ pub enum Command {
         /// Task ID
         id: String,
     },
+
+    /// Serve the HTTP API for remote clients (LT_URL + LT_TOKEN)
+    Serve {
+        /// Loopback address to bind; publish it through a TLS-terminating proxy
+        #[arg(long, default_value = "127.0.0.1:8095")]
+        addr: std::net::SocketAddr,
+        /// File with one accepted bearer token per line
+        #[arg(long)]
+        token_file: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]

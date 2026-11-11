@@ -1,8 +1,11 @@
 use llm_tasks::cli::{Cli, Command, DepCommand};
 use llm_tasks::db::{Database, Dependency, Event, Task, TaskUpdates};
+use llm_tasks::remote::HttpStore;
+use llm_tasks::server;
+use llm_tasks::store::TaskStore;
 
-struct CommandContext<'a> {
-    db: &'a Database,
+struct CommandContext<'a, S> {
+    db: &'a S,
     actor: &'a str,
     json: bool,
 }
@@ -10,11 +13,24 @@ struct CommandContext<'a> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = <Cli as clap::Parser>::parse();
-    let db = Database::open(&cli.db_path()).await?;
-    dispatch(cli, &db).await
+    if let Command::Serve { addr, token_file } = &cli.command {
+        let db = Database::open(&cli.db_path()).await?;
+        return server::serve(db, *addr, token_file).await;
+    }
+    match std::env::var("LT_URL") {
+        Ok(url) => {
+            let token = std::env::var("LT_TOKEN")
+                .map_err(|_| anyhow::anyhow!("LT_URL is set but LT_TOKEN is missing"))?;
+            dispatch(cli, &HttpStore::new(&url, &token)?).await
+        }
+        Err(_) => {
+            let db = Database::open(&cli.db_path()).await?;
+            dispatch(cli, &db).await
+        }
+    }
 }
 
-async fn dispatch(cli: Cli, db: &Database) -> anyhow::Result<()> {
+async fn dispatch(cli: Cli, db: &impl TaskStore) -> anyhow::Result<()> {
     let db_path = cli.db_path();
     let actor = cli.actor();
     let context = CommandContext {
@@ -42,10 +58,11 @@ fn is_core_command(command: &Command) -> bool {
 async fn handle_core_command(
     command: Command,
     db_path: &std::path::Path,
-    context: &CommandContext<'_>,
+    context: &CommandContext<'_, impl TaskStore>,
 ) -> anyhow::Result<()> {
     match command {
         Command::Init => println!("Database initialized at {}", db_path.display()),
+        Command::Serve { .. } => unreachable!("serve is handled before dispatch"),
         Command::Create {
             title,
             description,
@@ -76,7 +93,10 @@ async fn handle_core_command(
     Ok(())
 }
 
-async fn handle_task_command(command: Command, context: &CommandContext<'_>) -> anyhow::Result<()> {
+async fn handle_task_command(
+    command: Command,
+    context: &CommandContext<'_, impl TaskStore>,
+) -> anyhow::Result<()> {
     match command {
         Command::Show { id } => cmd_show(context.db, &id, context.json).await?,
         Command::Claim { id } => cmd_claim(context.db, &id, context.actor).await?,
@@ -110,7 +130,7 @@ async fn handle_task_command(command: Command, context: &CommandContext<'_>) -> 
 }
 
 async fn cmd_create(
-    db: &Database,
+    db: &impl TaskStore,
     title: &str,
     desc: Option<&str>,
     priority: u8,
@@ -127,7 +147,7 @@ async fn cmd_create(
 }
 
 async fn cmd_list(
-    db: &Database,
+    db: &impl TaskStore,
     status: Option<&str>,
     assignee: Option<&str>,
     json: bool,
@@ -148,7 +168,7 @@ async fn cmd_list(
     Ok(())
 }
 
-async fn cmd_ready(db: &Database, json: bool) -> anyhow::Result<()> {
+async fn cmd_ready(db: &impl TaskStore, json: bool) -> anyhow::Result<()> {
     let tasks = db.ready_tasks().await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&tasks)?);
@@ -160,7 +180,7 @@ async fn cmd_ready(db: &Database, json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_show(db: &Database, id: &str, json: bool) -> anyhow::Result<()> {
+async fn cmd_show(db: &impl TaskStore, id: &str, json: bool) -> anyhow::Result<()> {
     let task = db.get_task(id).await?;
     let deps = db.get_dependencies(id).await?;
     let comments = db.get_comments(id).await?;
@@ -178,14 +198,14 @@ async fn cmd_show(db: &Database, id: &str, json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_claim(db: &Database, id: &str, actor: &str) -> anyhow::Result<()> {
+async fn cmd_claim(db: &impl TaskStore, id: &str, actor: &str) -> anyhow::Result<()> {
     db.claim_task(id, actor).await?;
     println!("Claimed {} for {}", id, actor);
     Ok(())
 }
 
 async fn cmd_update(
-    db: &Database,
+    db: &impl TaskStore,
     id: &str,
     status: Option<&str>,
     priority: Option<u8>,
@@ -205,13 +225,13 @@ async fn cmd_update(
     Ok(())
 }
 
-async fn cmd_close(db: &Database, id: &str, actor: &str) -> anyhow::Result<()> {
+async fn cmd_close(db: &impl TaskStore, id: &str, actor: &str) -> anyhow::Result<()> {
     db.close_task(id, actor).await?;
     println!("Closed {}", id);
     Ok(())
 }
 
-async fn cmd_dep(db: &Database, command: DepCommand) -> anyhow::Result<()> {
+async fn cmd_dep(db: &impl TaskStore, command: DepCommand) -> anyhow::Result<()> {
     match command {
         DepCommand::Add { id, blocker } => {
             db.add_dependency(&id, &blocker, "blocks").await?;
@@ -226,7 +246,7 @@ async fn cmd_dep(db: &Database, command: DepCommand) -> anyhow::Result<()> {
 }
 
 async fn cmd_comment(
-    db: &Database,
+    db: &impl TaskStore,
     id: &str,
     content: &str,
     actor: &str,
@@ -241,7 +261,7 @@ async fn cmd_comment(
     Ok(())
 }
 
-async fn cmd_history(db: &Database, id: &str, json: bool) -> anyhow::Result<()> {
+async fn cmd_history(db: &impl TaskStore, id: &str, json: bool) -> anyhow::Result<()> {
     let events = db.get_events(id).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&events)?);

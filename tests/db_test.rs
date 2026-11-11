@@ -1,4 +1,4 @@
-use llm_tasks::db::{Database, TaskUpdates};
+use llm_tasks::db::{Conflict, Database, NotFound, TaskUpdates};
 use tempfile::TempDir;
 
 async fn temp_db() -> (Database, TempDir) {
@@ -577,4 +577,51 @@ async fn open_migrates_database_without_target_branch() {
         .unwrap();
 
     assert_eq!(task.target_branch.as_deref(), Some("branch"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_claims_across_connections_have_one_winner() {
+    // Two handles on one file stand in for two processes sharing the database.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("shared.db");
+    let first = std::sync::Arc::new(Database::open(&path).await.unwrap());
+    let second = std::sync::Arc::new(Database::open(&path).await.unwrap());
+    let task = first.create_task("Contested", None, 0, "a").await.unwrap();
+
+    let mut claims = Vec::new();
+    for n in 0..16 {
+        let db = if n % 2 == 0 {
+            first.clone()
+        } else {
+            second.clone()
+        };
+        let id = task.id.clone();
+        claims.push(tokio::spawn(async move {
+            db.claim_task(&id, &format!("agent-{n}")).await
+        }));
+    }
+    let mut winners = 0;
+    for claim in claims {
+        match claim.await.unwrap() {
+            Ok(()) => winners += 1,
+            Err(error) => assert!(error.downcast_ref::<Conflict>().is_some(), "{error}"),
+        }
+    }
+
+    assert_eq!(winners, 1);
+    let claimed_events = first
+        .get_events(&task.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.action == "claimed")
+        .count();
+    assert_eq!(claimed_events, 1);
+}
+
+#[tokio::test]
+async fn claim_missing_task_is_not_found() {
+    let (db, _dir) = temp_db().await;
+    let error = db.claim_task("lt-none", "a").await.unwrap_err();
+    assert!(error.downcast_ref::<NotFound>().is_some());
 }

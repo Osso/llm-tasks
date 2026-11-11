@@ -1,6 +1,6 @@
-use anyhow::{Result, bail};
-use rusqlite::{Connection, params};
-use serde::Serialize;
+use anyhow::Result;
+use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
 use crate::id;
@@ -9,7 +9,31 @@ pub struct Database {
     conn: Arc<Mutex<Connection>>,
 }
 
-#[derive(Debug, Serialize, Clone, PartialEq)]
+/// The requested task does not exist. Carried inside `anyhow::Error`; the HTTP
+/// layer maps it to 404 and the remote client maps 404 back to it.
+#[derive(Debug)]
+pub struct NotFound(pub String);
+
+/// The task exists but is not in a state that allows the operation (HTTP 409).
+#[derive(Debug)]
+pub struct Conflict(pub String);
+
+impl std::fmt::Display for NotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::fmt::Display for Conflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NotFound {}
+impl std::error::Error for Conflict {}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct Task {
     pub id: String,
     pub title: String,
@@ -32,14 +56,14 @@ pub struct TaskUpdates<'a> {
     pub target_branch: Option<&'a str>,
 }
 
-#[derive(Debug, Serialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct Dependency {
     pub task_id: String,
     pub depends_on: String,
     pub dep_type: String,
 }
 
-#[derive(Debug, Serialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct Comment {
     pub id: i64,
     pub task_id: String,
@@ -48,7 +72,7 @@ pub struct Comment {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct Event {
     pub id: i64,
     pub task_id: String,
@@ -128,7 +152,7 @@ impl Database {
             let mut rows = stmt.query(params![&id])?;
             match rows.next()? {
                 Some(row) => Ok(row_to_task(row)),
-                None => bail!("Task not found: {}", id),
+                None => Err(NotFound(format!("Task not found: {}", id)).into()),
             }
         })
         .await?
@@ -166,30 +190,41 @@ impl Database {
         .await?
     }
 
+    /// Claim in one conditional UPDATE inside a transaction, so concurrent
+    /// claimers (in-process or separate processes on the same file) get exactly
+    /// one winner; the losers see `Conflict`.
     pub async fn claim_task(&self, id: &str, actor: &str) -> Result<()> {
-        let task = self.get_task(id).await?;
-        if task.status != "pending" && task.status != "ready" {
-            bail!("Cannot claim task {}: status is {}", id, task.status);
-        }
-        if task.assignee.is_some() {
-            bail!(
-                "Cannot claim task {}: already assigned to {}",
-                id,
-                task.assignee.unwrap()
-            );
-        }
         let now = now_iso();
         let conn = self.conn.clone();
         let id = id.to_string();
         let actor = actor.to_string();
         tokio::task::spawn_blocking(move || -> Result<()> {
-            let c = conn.lock().unwrap();
-            c.execute(
+            let mut c = conn.lock().unwrap();
+            let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let previous: Option<(String, Option<String>)> = tx
+                .query_row(
+                    "SELECT status, assignee FROM tasks WHERE id = ?1",
+                    params![&id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let Some((status, assignee)) = previous else {
+                return Err(NotFound(format!("Task not found: {}", id)).into());
+            };
+            let claimed = tx.execute(
                 "UPDATE tasks SET assignee = ?1, status = 'in_progress', updated_at = ?2 WHERE id = ?3 AND (status = 'pending' OR status = 'ready') AND assignee IS NULL",
                 params![&actor, &now, &id],
             )?;
-            record_event(&c, &id, &actor, "claimed", Some("assignee"), None, Some(&actor))?;
-            record_event(&c, &id, &actor, "updated", Some("status"), Some("pending"), Some("in_progress"))?;
+            if claimed == 0 {
+                let reason = match assignee {
+                    Some(owner) => format!("already assigned to {}", owner),
+                    None => format!("status is {}", status),
+                };
+                return Err(Conflict(format!("Cannot claim task {}: {}", id, reason)).into());
+            }
+            record_event(&tx, &id, &actor, "claimed", Some("assignee"), None, Some(&actor))?;
+            record_event(&tx, &id, &actor, "updated", Some("status"), Some(&status), Some("in_progress"))?;
+            tx.commit()?;
             Ok(())
         })
         .await??;
