@@ -85,7 +85,7 @@ async fn record_request(State(state): State<StubState>, request: Request<Body>) 
     } else {
         body.to_string()
     }));
-    *response.status_mut() = status.into();
+    *response.status_mut() = axum::http::StatusCode::from_u16(status).unwrap();
     response
         .headers_mut()
         .insert("content-type", "application/json".parse().unwrap());
