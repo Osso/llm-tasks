@@ -70,7 +70,7 @@ async fn record_request(State(state): State<StubState>, request: Request<Body>) 
         "/tasks" if parts.method == "POST" => (201, task_json()),
         "/tasks/task%20one" => (200, task_json()),
         "/tasks/task one" => (200, task_json()),
-        "/tasks/task one/comments" => (201, comment_json()),
+        "/tasks/task%20one/comments" => (201, comment_json()),
         path if path.ends_with("/comments") && parts.method == "GET" => {
             (200, json!([comment_json()]))
         }
