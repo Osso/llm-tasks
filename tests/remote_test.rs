@@ -37,7 +37,7 @@ async fn spawn_test_api() -> (String, StubState) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    (format!("http://{address}/",), state)
+    (format!("http://{address}"), state)
 }
 
 async fn record_request(State(state): State<StubState>, request: Request<Body>) -> Response<Body> {
@@ -104,6 +104,7 @@ fn comment_json() -> Value {
 async fn task_and_comment_responses_deserialize_and_requests_follow_contract() {
     let (url, state) = spawn_test_api().await;
     let store = HttpStore::new(&url, "secret").unwrap();
+    assert!(HttpStore::new(&format!("{url}/"), "secret").is_ok());
 
     let created = store
         .create_task("Ship it", Some("details"), 3, "agent-a")
@@ -161,6 +162,11 @@ async fn task_and_comment_responses_deserialize_and_requests_follow_contract() {
             .find(|r| r.method == method && r.path.starts_with(path))
             .unwrap()
     };
+    assert!(
+        requests
+            .iter()
+            .all(|r| r.authorization.as_deref() == Some("Bearer secret"))
+    );
     let create = requests
         .iter()
         .find(|r| r.method == "POST" && r.path == "/tasks")
@@ -204,6 +210,29 @@ async fn task_and_comment_responses_deserialize_and_requests_follow_contract() {
             .authorization
             .is_some()
     );
+    assert!(
+        request("GET", "/tasks/task%20one/dependencies")
+            .body
+            .is_null()
+    );
+    assert!(request("GET", "/tasks/task%20one/comments").body.is_null());
+    assert!(request("GET", "/tasks/task%20one/events").body.is_null());
+    for r in requests.iter().filter(|r| {
+        (r.method == "POST"
+            && (r.path == "/tasks"
+                || r.path.ends_with("/claim")
+                || r.path.ends_with("/close")
+                || r.path.ends_with("/comments")))
+            || r.method == "PATCH"
+    }) {
+        assert_eq!(
+            r.actor.as_deref(),
+            Some("agent-a"),
+            "{} {}",
+            r.method,
+            r.path
+        );
+    }
 }
 
 #[tokio::test]
