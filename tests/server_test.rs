@@ -417,3 +417,65 @@ async fn events_feed_returns_other_tasks_and_comments_after_cursor() {
     let no_token = client.get(format!("{base}/events")).send().await.unwrap();
     assert_eq!(no_token.status(), reqwest::StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn due_tasks_and_delivery_acknowledgement_over_http() {
+    let (base, client, _dir) = start_server().await;
+    let created = create(&client, &base, "Reminder").await;
+    let id = created["id"].as_str().unwrap();
+    let invalid = request(
+        &client,
+        reqwest::Method::PATCH,
+        format!("{base}/tasks/{id}"),
+    )
+    .json(&json!({"due_at": "next week"}))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(invalid.status(), reqwest::StatusCode::BAD_REQUEST);
+    let patched = request(
+        &client,
+        reqwest::Method::PATCH,
+        format!("{base}/tasks/{id}"),
+    )
+    .json(&json!({"due_at": "2020-01-01T09:00:00+01:00"}))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(patched.status(), reqwest::StatusCode::NO_CONTENT);
+
+    let due: Vec<Value> = request(&client, reqwest::Method::GET, format!("{base}/tasks/due"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0]["id"], id);
+    assert_eq!(due[0]["due_at"], "2020-01-01T08:00:00Z");
+    assert_eq!(due[0]["delivered_at"], Value::Null);
+
+    let deliver = |due_at: &'static str| {
+        request(
+            &client,
+            reqwest::Method::POST,
+            format!("{base}/tasks/{id}/delivered"),
+        )
+        .header("X-LT-Actor", "agent-server-supervisor")
+        .json(&json!({"due_at": due_at}))
+        .send()
+    };
+    let stale = deliver("2019-01-01T08:00:00Z").await.unwrap();
+    assert_eq!(stale.status(), reqwest::StatusCode::CONFLICT);
+    let acked = deliver("2020-01-01T08:00:00Z").await.unwrap();
+    assert_eq!(acked.status(), reqwest::StatusCode::NO_CONTENT);
+    let after: Vec<Value> = request(&client, reqwest::Method::GET, format!("{base}/tasks/due"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(after.is_empty());
+}

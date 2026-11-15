@@ -9,6 +9,8 @@ different hosts share the same tasks.
 ```sh
 lt create "Fix login" -p 2      # prints the new id, e.g. lt-a1b2
 lt ready                        # unblocked, unassigned tasks
+lt create "Recheck advisories" --due 2026-11-15T09:00:00-06:00   # a reminder
+lt due                          # reminders past due, not yet delivered
 lt claim lt-a1b2 --actor me     # atomic: exactly one claimer wins
 lt close lt-a1b2
 ```

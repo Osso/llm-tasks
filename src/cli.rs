@@ -58,6 +58,9 @@ pub enum Command {
         /// Priority (0=none, 1=low, 2=medium, 3=high)
         #[arg(short, long, default_value_t = 0)]
         priority: u8,
+        /// Due time, RFC 3339 with offset (e.g. 2026-11-15T09:00:00-06:00); makes the task a reminder
+        #[arg(long)]
+        due: Option<String>,
     },
 
     /// List tasks
@@ -72,6 +75,9 @@ pub enum Command {
 
     /// Show unblocked tasks ready for work
     Ready,
+
+    /// Show open tasks whose due time has passed and is not yet delivered
+    Due,
 
     /// Show task details
     Show {
@@ -101,6 +107,9 @@ pub enum Command {
         /// New description
         #[arg(short, long)]
         description: Option<String>,
+        /// New due time, RFC 3339 with offset; "" clears it. Clears the delivery mark
+        #[arg(long)]
+        due: Option<String>,
     },
 
     /// Close a task

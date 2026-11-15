@@ -14,6 +14,9 @@ is set; every command behaves the same as in local mode.
 - [x] The actor for the audit trail comes from the `X-LT-Actor` header (default `unknown`). It is caller-asserted, not authenticated.
 - [x] Concurrent claims of one task over HTTP produce exactly one 204; every other claimer gets 409.
 - [x] A claim is one conditional `UPDATE` in an immediate transaction; events are recorded only for the winning claim.
+- [x] Reminders are tasks with a due time. `due_at` and `delivered_at` are RFC 3339 UTC (`...Z`) or null. Input due times need an explicit offset and are normalized to UTC; any other value returns 400. Changing `due_at`, or setting status back to `pending`, clears `delivered_at`.
+- [x] `GET /tasks/due` returns tasks whose status is not `completed`/`done`, whose `due_at` is at or before the server's current time, and whose `delivered_at` is null, ordered by `due_at`. `POST /tasks/{id}/delivered` with `{"due_at"}` sets `delivered_at` only when that due time is still current, undelivered and open (one conditional `UPDATE`); otherwise 409. It records a `delivered` event. The Pi Supervisor polls this route and delivers each due task into its conversation.
+- [x] CLI: `lt create --due <time>`, `lt update <id> --due <time>` (`""` clears it), `lt due`.
 - [x] Client mode: `LT_URL` (base URL, no trailing slash needed) + `LT_TOKEN` (required when `LT_URL` is set). Responses 404 and 409 map back to `db::NotFound` / `db::Conflict` with the server's message, so CLI output matches local mode. Other non-2xx statuses fail with the status and the server's `error` message.
 
 ## Routes
@@ -29,7 +32,9 @@ All bodies are JSON. Errors are `{"error": "<message>"}`.
 | GET | `/tasks?status=&assignee=` | — | 200 `[Task]` | `list_tasks` |
 | GET | `/tasks/ready` | — | 200 `[Task]` | `ready_tasks` |
 | GET | `/tasks/{id}` | — | 200 `Task` | `get_task` |
-| PATCH | `/tasks/{id}` | `{"status"?, "priority"?, "title"?, "description"?, "assignee"?, "target_branch"?}` | 204 | `update_task` |
+| PATCH | `/tasks/{id}` | `{"status"?, "priority"?, "title"?, "description"?, "assignee"?, "target_branch"?, "due_at"?}` | 204 | `update_task` |
+| GET | `/tasks/due` | — | 200 `[Task]` | `due_tasks` |
+| POST | `/tasks/{id}/delivered` | `{"due_at"}` | 204 | `mark_delivered` |
 | POST | `/tasks/{id}/claim` | — | 204 | `claim_task` |
 | POST | `/tasks/{id}/close` | — | 204 | `close_task` |
 | GET | `/tasks/{id}/dependencies` | — | 200 `[Dependency]` | `get_dependencies` |
@@ -47,13 +52,14 @@ All bodies are JSON. Errors are `{"error": "<message>"}`.
 |---|---|
 | `db::NotFound` | 404 |
 | `db::Conflict` | 409 |
+| `db::Invalid` (bad due time) | 400 |
 | malformed JSON / missing field | 400 (axum default rejection is fine) |
 | anything else | 500 |
 
 ## Tests asserting this spec
 
-- `tests/db_test.rs`: atomic claim (concurrent claimers, one winner, one event pair).
-- `tests/server_test.rs`: auth, routes, error mapping, concurrent HTTP claims, `/rules` auth, live file edits and 404 when unconfigured, `/events` cursor feed.
+- `tests/db_test.rs`: atomic claim (concurrent claimers, one winner, one event pair); due listing, due-time validation, delivery reset on reschedule/reopen, stale or repeated delivery conflicts.
+- `tests/server_test.rs`: auth, routes, error mapping, concurrent HTTP claims, `/rules` auth, live file edits and 404 when unconfigured, `/events` cursor feed, `/tasks/due` and delivery acknowledgement.
 
 ## Watcher
 

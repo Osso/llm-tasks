@@ -30,8 +30,37 @@ impl std::fmt::Display for Conflict {
     }
 }
 
+/// The request carries an invalid value (HTTP 400).
+#[derive(Debug)]
+pub struct Invalid(pub String);
+
+impl std::fmt::Display for Invalid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 impl std::error::Error for NotFound {}
 impl std::error::Error for Conflict {}
+impl std::error::Error for Invalid {}
+
+/// Columns read by `row_to_task`, in order.
+const TASK_COLUMNS: &str = "id, title, description, status, priority, assignee, target_branch, created_at, updated_at, due_at, delivered_at";
+
+/// Statuses that end a task; closed tasks are never due.
+const CLOSED_STATUSES: &str = "('completed', 'done')";
+
+/// Normalize a due time with an explicit offset to RFC 3339 UTC (`...Z`, seconds).
+pub fn normalize_due_at(value: &str) -> Result<String> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(value).map_err(|_| {
+        Invalid(format!(
+            "Invalid due time {value:?}: use RFC 3339 with an offset, e.g. 2026-11-15T09:00:00-06:00"
+        ))
+    })?;
+    Ok(parsed
+        .with_timezone(&chrono::Utc)
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct Task {
@@ -44,6 +73,12 @@ pub struct Task {
     pub target_branch: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// When the task is due (RFC 3339 UTC); a task with a due time is a reminder.
+    #[serde(default)]
+    pub due_at: Option<String>,
+    /// When the current due time was delivered; cleared by rescheduling or reopening.
+    #[serde(default)]
+    pub delivered_at: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -54,6 +89,7 @@ pub struct TaskUpdates<'a> {
     pub description: Option<&'a str>,
     pub assignee: Option<&'a str>,
     pub target_branch: Option<&'a str>,
+    pub due_at: Option<&'a str>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -148,7 +184,7 @@ impl Database {
         let id = id.to_string();
         tokio::task::spawn_blocking(move || {
             let c = conn.lock().unwrap();
-            let mut stmt = c.prepare("SELECT id, title, description, status, priority, assignee, target_branch, created_at, updated_at FROM tasks WHERE id = ?1")?;
+            let mut stmt = c.prepare(&format!("SELECT {TASK_COLUMNS} FROM tasks WHERE id = ?1"))?;
             let mut rows = stmt.query(params![&id])?;
             match rows.next()? {
                 Some(row) => Ok(row_to_task(row)),
@@ -182,7 +218,7 @@ impl Database {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let c = conn.lock().unwrap();
-            let sql = "SELECT t.id, t.title, t.description, t.status, t.priority, t.assignee, t.target_branch, t.created_at, t.updated_at FROM tasks t WHERE t.status IN ('pending', 'ready') AND t.assignee IS NULL AND t.id NOT IN (SELECT d.task_id FROM dependencies d JOIN tasks bt ON d.depends_on = bt.id WHERE bt.status NOT IN ('completed', 'done')) ORDER BY t.priority DESC, t.created_at ASC";
+            let sql = "SELECT t.id, t.title, t.description, t.status, t.priority, t.assignee, t.target_branch, t.created_at, t.updated_at, t.due_at, t.delivered_at FROM tasks t WHERE t.status IN ('pending', 'ready') AND t.assignee IS NULL AND t.id NOT IN (SELECT d.task_id FROM dependencies d JOIN tasks bt ON d.depends_on = bt.id WHERE bt.status NOT IN ('completed', 'done')) ORDER BY t.priority DESC, t.created_at ASC";
             let mut stmt = c.prepare(sql)?;
             let mut rows = stmt.query([])?;
             collect_tasks(&mut rows)
@@ -232,32 +268,73 @@ impl Database {
     }
 
     pub async fn update_task(&self, id: &str, updates: TaskUpdates<'_>, actor: &str) -> Result<()> {
+        let due_at = match updates.due_at {
+            Some(value) if !value.is_empty() => Some(normalize_due_at(value)?),
+            other => other.map(str::to_owned),
+        };
         let task = self.get_task(id).await?;
+        let changes = field_changes(&task, &updates, due_at);
+        let resets_delivery = updates.status == Some("pending")
+            || changes
+                .iter()
+                .any(|change| change.field == "due_at" && change.is_change());
         let now = now_iso();
         let conn = self.conn.clone();
         let id = id.to_string();
         let actor = actor.to_string();
-        let status = updates.status.map(|s| s.to_string());
-        let priority = updates.priority;
-        let title = updates.title.map(|s| s.to_string());
-        let description = updates.description.map(|s| s.to_string());
-        let assignee = updates.assignee.map(|s| s.to_string());
-        let target_branch = updates.target_branch.map(|s| s.to_string());
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let c = conn.lock().unwrap();
+            for change in &changes {
+                apply_field_update(&c, &id, &actor, &now, change)?;
+            }
+            if resets_delivery {
+                c.execute(
+                    "UPDATE tasks SET delivered_at = NULL WHERE id = ?1",
+                    params![&id],
+                )?;
+            }
+            Ok(())
+        })
+        .await?
+    }
+
+    /// Open tasks whose due time has passed and whose current due time is not yet delivered.
+    pub async fn due_tasks(&self, now: &str) -> Result<Vec<Task>> {
+        let conn = self.conn.clone();
+        let now = now.to_string();
         tokio::task::spawn_blocking(move || {
             let c = conn.lock().unwrap();
-            apply_task_fields(
-                &c,
-                &id,
-                &actor,
-                &now,
-                &task,
-                status.as_deref(),
-                priority,
-                title.as_deref(),
-                description.as_deref(),
-                assignee.as_deref(),
-                target_branch.as_deref(),
-            )
+            let sql = format!(
+                "SELECT {TASK_COLUMNS} FROM tasks WHERE status NOT IN {CLOSED_STATUSES} AND due_at IS NOT NULL AND due_at <= ?1 AND delivered_at IS NULL ORDER BY due_at, id"
+            );
+            let mut stmt = c.prepare(&sql)?;
+            let mut rows = stmt.query(params![&now])?;
+            collect_tasks(&mut rows)
+        })
+        .await?
+    }
+
+    /// Acknowledge delivery of the task's due time `due_at`. Conflict when the task
+    /// was rescheduled, closed or already delivered since the caller read it.
+    pub async fn mark_delivered(&self, id: &str, due_at: &str, actor: &str) -> Result<()> {
+        self.get_task(id).await?;
+        let now = now_iso();
+        let conn = self.conn.clone();
+        let id = id.to_string();
+        let due_at = due_at.to_string();
+        let actor = actor.to_string();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let c = conn.lock().unwrap();
+            let sql = format!(
+                "UPDATE tasks SET delivered_at = ?1 WHERE id = ?2 AND due_at = ?3 AND delivered_at IS NULL AND status NOT IN {CLOSED_STATUSES}"
+            );
+            if c.execute(&sql, params![&now, &id, &due_at])? == 0 {
+                return Err(Conflict(format!(
+                    "Task {id} has no undelivered due time {due_at}"
+                ))
+                .into());
+            }
+            record_event(&c, &id, &actor, "delivered", Some("due_at"), None, Some(&due_at))
         })
         .await?
     }
@@ -464,7 +541,8 @@ const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS tasks (
         id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT,
         status TEXT NOT NULL DEFAULT 'pending', priority INTEGER NOT NULL DEFAULT 0,
-        assignee TEXT, target_branch TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        assignee TEXT, target_branch TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        due_at TEXT, delivered_at TEXT
     );
     CREATE TABLE IF NOT EXISTS dependencies (
         task_id TEXT NOT NULL REFERENCES tasks(id),
@@ -496,6 +574,11 @@ fn migrate(conn: &Connection) -> Result<()> {
         .is_ok();
     if !has_col {
         conn.execute_batch("ALTER TABLE tasks ADD COLUMN target_branch TEXT")?;
+    }
+    if conn.prepare("SELECT due_at FROM tasks LIMIT 0").is_err() {
+        conn.execute_batch(
+            "ALTER TABLE tasks ADD COLUMN due_at TEXT; ALTER TABLE tasks ADD COLUMN delivered_at TEXT;",
+        )?;
     }
     Ok(())
 }
@@ -530,31 +613,51 @@ fn record_event(
     Ok(())
 }
 
-fn apply_task_fields(
-    conn: &Connection,
-    id: &str,
-    actor: &str,
-    now: &str,
+/// One field of an update: the stored value and the requested one (None = unchanged).
+struct FieldChange {
+    field: &'static str,
+    old: String,
+    new: Option<String>,
+}
+
+impl FieldChange {
+    fn new(field: &'static str, old: Option<&str>, new: Option<&str>) -> Self {
+        Self {
+            field,
+            old: old.unwrap_or("").to_owned(),
+            new: new.map(str::to_owned),
+        }
+    }
+
+    fn is_change(&self) -> bool {
+        self.new.as_ref().is_some_and(|new| *new != self.old)
+    }
+}
+
+fn field_changes(
     task: &Task,
-    status: Option<&str>,
-    priority: Option<u8>,
-    title: Option<&str>,
-    description: Option<&str>,
-    assignee: Option<&str>,
-    target_branch: Option<&str>,
-) -> Result<()> {
-    apply_field_update(conn, id, actor, now, "status", &task.status, status)?;
-    let pri = task.priority.to_string();
-    let new_pri = priority.map(|p| p.to_string());
-    apply_field_update(conn, id, actor, now, "priority", &pri, new_pri.as_deref())?;
-    apply_field_update(conn, id, actor, now, "title", &task.title, title)?;
-    let desc = task.description.as_deref().unwrap_or("");
-    apply_field_update(conn, id, actor, now, "description", desc, description)?;
-    let asgn = task.assignee.as_deref().unwrap_or("");
-    apply_field_update(conn, id, actor, now, "assignee", asgn, assignee)?;
-    let tb = task.target_branch.as_deref().unwrap_or("");
-    apply_field_update(conn, id, actor, now, "target_branch", tb, target_branch)?;
-    Ok(())
+    updates: &TaskUpdates<'_>,
+    due_at: Option<String>,
+) -> Vec<FieldChange> {
+    let priority = task.priority.to_string();
+    let new_priority = updates.priority.map(|p| p.to_string());
+    vec![
+        FieldChange::new("status", Some(&task.status), updates.status),
+        FieldChange::new("priority", Some(&priority), new_priority.as_deref()),
+        FieldChange::new("title", Some(&task.title), updates.title),
+        FieldChange::new(
+            "description",
+            task.description.as_deref(),
+            updates.description,
+        ),
+        FieldChange::new("assignee", task.assignee.as_deref(), updates.assignee),
+        FieldChange::new(
+            "target_branch",
+            task.target_branch.as_deref(),
+            updates.target_branch,
+        ),
+        FieldChange::new("due_at", task.due_at.as_deref(), due_at.as_deref()),
+    ]
 }
 
 fn apply_field_update(
@@ -562,17 +665,15 @@ fn apply_field_update(
     id: &str,
     actor: &str,
     now: &str,
-    field: &str,
-    old: &str,
-    new: Option<&str>,
+    change: &FieldChange,
 ) -> Result<()> {
-    let Some(new_val) = new else { return Ok(()) };
-    if new_val == old {
+    if !change.is_change() {
         return Ok(());
     }
+    let new_val = change.new.as_deref().unwrap_or("");
     let sql = format!(
         "UPDATE tasks SET {} = ?1, updated_at = ?2 WHERE id = ?3",
-        field
+        change.field
     );
     // Empty string means "clear the field" → store as NULL
     let db_val: Option<&str> = if new_val.is_empty() {
@@ -586,15 +687,15 @@ fn apply_field_update(
         id,
         actor,
         "updated",
-        Some(field),
-        Some(old),
+        Some(change.field),
+        Some(&change.old),
         Some(new_val),
     )?;
     Ok(())
 }
 
 fn build_list_query(status: Option<&str>, assignee: Option<&str>) -> (String, Vec<String>) {
-    let mut sql = "SELECT id, title, description, status, priority, assignee, target_branch, created_at, updated_at FROM tasks".to_string();
+    let mut sql = format!("SELECT {TASK_COLUMNS} FROM tasks");
     let mut conditions = Vec::new();
     let mut params = Vec::new();
     if let Some(s) = status {
@@ -640,10 +741,12 @@ fn row_to_task(row: &rusqlite::Row) -> Task {
         target_branch: row.get(6).ok(),
         created_at: row.get(7).unwrap_or_default(),
         updated_at: row.get(8).unwrap_or_default(),
+        due_at: row.get(9).ok(),
+        delivered_at: row.get(10).ok(),
     }
 }
 
-fn now_iso() -> String {
+pub fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 

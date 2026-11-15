@@ -1,5 +1,5 @@
 use llm_tasks::cli::{Cli, Command, DepCommand};
-use llm_tasks::db::{Database, Dependency, Event, Task, TaskUpdates};
+use llm_tasks::db::{Database, Dependency, Event, Task, TaskUpdates, normalize_due_at};
 use llm_tasks::remote::HttpStore;
 use llm_tasks::server;
 use llm_tasks::store::TaskStore;
@@ -56,7 +56,11 @@ async fn dispatch(cli: Cli, db: &impl TaskStore) -> anyhow::Result<()> {
 fn is_core_command(command: &Command) -> bool {
     matches!(
         command,
-        Command::Init | Command::Create { .. } | Command::List { .. } | Command::Ready
+        Command::Init
+            | Command::Create { .. }
+            | Command::List { .. }
+            | Command::Ready
+            | Command::Due
     )
 }
 
@@ -72,16 +76,15 @@ async fn handle_core_command(
             title,
             description,
             priority,
+            due,
         } => {
-            cmd_create(
-                context.db,
-                &title,
-                description.as_deref(),
+            let new_task = NewTask {
+                title: &title,
+                description: description.as_deref(),
                 priority,
-                context.actor,
-                context.json,
-            )
-            .await?
+                due: due.as_deref(),
+            };
+            cmd_create(context, new_task).await?
         }
         Command::List { status, assignee } => {
             cmd_list(
@@ -92,7 +95,8 @@ async fn handle_core_command(
             )
             .await?
         }
-        Command::Ready => cmd_ready(context.db, context.json).await?,
+        Command::Ready => print_tasks(&context.db.ready_tasks().await?, context.json)?,
+        Command::Due => print_tasks(&context.db.due_tasks().await?, context.json)?,
         _ => unreachable!("core command router received a task command"),
     }
     Ok(())
@@ -111,17 +115,18 @@ async fn handle_task_command(
             priority,
             title,
             description,
+            due,
         } => {
-            cmd_update(
-                context.db,
-                &id,
-                status.as_deref(),
+            let updates = TaskUpdates {
+                status: status.as_deref(),
                 priority,
-                title.as_deref(),
-                description.as_deref(),
-                context.actor,
-            )
-            .await?
+                title: title.as_deref(),
+                description: description.as_deref(),
+                due_at: due.as_deref(),
+                ..Default::default()
+            };
+            context.db.update_task(&id, updates, context.actor).await?;
+            println!("Updated {}", id);
         }
         Command::Close { id } => cmd_close(context.db, &id, context.actor).await?,
         Command::Comment { id, content } => {
@@ -134,16 +139,38 @@ async fn handle_task_command(
     Ok(())
 }
 
-async fn cmd_create(
-    db: &impl TaskStore,
-    title: &str,
-    desc: Option<&str>,
+struct NewTask<'a> {
+    title: &'a str,
+    description: Option<&'a str>,
     priority: u8,
-    actor: &str,
-    json: bool,
+    due: Option<&'a str>,
+}
+
+/// Create the task, then set its due time; the due time is validated first so an
+/// invalid one creates nothing.
+async fn cmd_create(
+    context: &CommandContext<'_, impl TaskStore>,
+    new_task: NewTask<'_>,
 ) -> anyhow::Result<()> {
-    let task = db.create_task(title, desc, priority, actor).await?;
-    if json {
+    let due_at = new_task.due.map(normalize_due_at).transpose()?;
+    let (db, actor) = (context.db, context.actor);
+    let mut task = db
+        .create_task(
+            new_task.title,
+            new_task.description,
+            new_task.priority,
+            actor,
+        )
+        .await?;
+    if let Some(due_at) = due_at.as_deref() {
+        let updates = TaskUpdates {
+            due_at: Some(due_at),
+            ..Default::default()
+        };
+        db.update_task(&task.id, updates, actor).await?;
+        task = db.get_task(&task.id).await?;
+    }
+    if context.json {
         println!("{}", serde_json::to_string_pretty(&task)?);
     } else {
         println!("{} {}", task.id, task.title);
@@ -167,22 +194,35 @@ async fn cmd_list(
                 .as_deref()
                 .map(|a| format!("({})", a))
                 .unwrap_or_default();
-            println!("{} [{}] {} {}", t.id, t.status, t.title, who);
+            println!(
+                "{} [{}] {} {}{}",
+                t.id,
+                t.status,
+                t.title,
+                who,
+                due_suffix(t)
+            );
         }
     }
     Ok(())
 }
 
-async fn cmd_ready(db: &impl TaskStore, json: bool) -> anyhow::Result<()> {
-    let tasks = db.ready_tasks().await?;
+fn print_tasks(tasks: &[Task], json: bool) -> anyhow::Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(&tasks)?);
+        println!("{}", serde_json::to_string_pretty(tasks)?);
     } else {
-        for t in &tasks {
-            println!("{} [p{}] {}", t.id, t.priority, t.title);
+        for t in tasks {
+            println!("{} [p{}] {}{}", t.id, t.priority, t.title, due_suffix(t));
         }
     }
     Ok(())
+}
+
+fn due_suffix(task: &Task) -> String {
+    task.due_at
+        .as_deref()
+        .map(|due| format!(" (due {due})"))
+        .unwrap_or_default()
 }
 
 async fn cmd_show(db: &impl TaskStore, id: &str, json: bool) -> anyhow::Result<()> {
@@ -206,27 +246,6 @@ async fn cmd_show(db: &impl TaskStore, id: &str, json: bool) -> anyhow::Result<(
 async fn cmd_claim(db: &impl TaskStore, id: &str, actor: &str) -> anyhow::Result<()> {
     db.claim_task(id, actor).await?;
     println!("Claimed {} for {}", id, actor);
-    Ok(())
-}
-
-async fn cmd_update(
-    db: &impl TaskStore,
-    id: &str,
-    status: Option<&str>,
-    priority: Option<u8>,
-    title: Option<&str>,
-    desc: Option<&str>,
-    actor: &str,
-) -> anyhow::Result<()> {
-    let updates = TaskUpdates {
-        status,
-        priority,
-        title,
-        description: desc,
-        ..Default::default()
-    };
-    db.update_task(id, updates, actor).await?;
-    println!("Updated {}", id);
     Ok(())
 }
 
@@ -294,6 +313,12 @@ fn print_task(task: &Task, deps: &[Dependency]) {
     println!("Priority: {}", task.priority);
     if let Some(a) = &task.assignee {
         println!("Assignee: {}", a);
+    }
+    if let Some(due) = &task.due_at {
+        println!("Due:      {}", due);
+    }
+    if let Some(delivered) = &task.delivered_at {
+        println!("Delivered: {}", delivered);
     }
     println!("Created:  {}", task.created_at);
     println!("Updated:  {}", task.updated_at);

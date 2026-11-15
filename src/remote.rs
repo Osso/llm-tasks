@@ -126,6 +126,13 @@ struct TaskUpdate<'a> {
     assignee: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     target_branch: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    due_at: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct MarkDelivered<'a> {
+    due_at: &'a str,
 }
 
 #[derive(Serialize)]
@@ -208,12 +215,28 @@ impl TaskStore for HttpStore {
             description: updates.description,
             assignee: updates.assignee,
             target_branch: updates.target_branch,
+            due_at: updates.due_at,
         };
         self.send_empty(
             Method::PATCH,
             &format!("tasks/{}", segment(id)),
             Some(actor),
             Some(body),
+        )
+        .await
+    }
+
+    async fn due_tasks(&self) -> Result<Vec<Task>> {
+        self.send(Method::GET, "tasks/due", None, None::<serde_json::Value>)
+            .await
+    }
+
+    async fn mark_delivered(&self, id: &str, due_at: &str, actor: &str) -> Result<()> {
+        self.send_empty(
+            Method::POST,
+            &format!("tasks/{}/delivered", segment(id)),
+            Some(actor),
+            Some(MarkDelivered { due_at }),
         )
         .await
     }

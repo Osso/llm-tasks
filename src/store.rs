@@ -30,6 +30,14 @@ pub trait TaskStore {
         updates: TaskUpdates<'_>,
         actor: &str,
     ) -> impl Future<Output = Result<()>> + Send;
+    /// Open tasks whose due time has passed and is not yet delivered (reminders).
+    fn due_tasks(&self) -> impl Future<Output = Result<Vec<Task>>> + Send;
+    fn mark_delivered(
+        &self,
+        id: &str,
+        due_at: &str,
+        actor: &str,
+    ) -> impl Future<Output = Result<()>> + Send;
     fn close_task(&self, id: &str, actor: &str) -> impl Future<Output = Result<()>> + Send;
     fn add_dependency(
         &self,
@@ -85,6 +93,14 @@ impl TaskStore for Database {
 
     async fn update_task(&self, id: &str, updates: TaskUpdates<'_>, actor: &str) -> Result<()> {
         Database::update_task(self, id, updates, actor).await
+    }
+
+    async fn due_tasks(&self) -> Result<Vec<Task>> {
+        Database::due_tasks(self, &crate::db::now_iso()).await
+    }
+
+    async fn mark_delivered(&self, id: &str, due_at: &str, actor: &str) -> Result<()> {
+        Database::mark_delivered(self, id, due_at, actor).await
     }
 
     async fn close_task(&self, id: &str, actor: &str) -> Result<()> {

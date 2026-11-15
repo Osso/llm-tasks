@@ -18,7 +18,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::db::{Conflict, Database, NotFound, TaskUpdates};
+use crate::db::{Conflict, Database, Invalid, NotFound, TaskUpdates, now_iso};
 
 #[derive(Clone)]
 struct AppState {
@@ -39,6 +39,8 @@ pub fn router(db: Database, tokens: Vec<String>, rules_file: Option<PathBuf>) ->
         .route("/events", get(events_after))
         .route("/tasks", post(create_task).get(list_tasks))
         .route("/tasks/ready", get(ready_tasks))
+        .route("/tasks/due", get(due_tasks))
+        .route("/tasks/{id}/delivered", post(mark_delivered))
         .route("/tasks/{id}", get(get_task).patch(update_task))
         .route("/tasks/{id}/claim", post(claim_task))
         .route("/tasks/{id}/close", post(close_task))
@@ -164,6 +166,8 @@ fn error_response(error: anyhow::Error) -> Response {
         StatusCode::NOT_FOUND
     } else if error.downcast_ref::<Conflict>().is_some() {
         StatusCode::CONFLICT
+    } else if error.downcast_ref::<Invalid>().is_some() {
+        StatusCode::BAD_REQUEST
     } else {
         StatusCode::INTERNAL_SERVER_ERROR
     };
@@ -197,18 +201,16 @@ async fn create_task(
     headers: HeaderMap,
     Json(body): Json<CreateTask>,
 ) -> Response {
-    result_response(
-        state
-            .db
-            .create_task(
-                &body.title,
-                body.description.as_deref(),
-                body.priority.unwrap_or(0),
-                actor(&headers),
-            )
-            .await,
-        StatusCode::CREATED,
-    )
+    let created = state
+        .db
+        .create_task(
+            &body.title,
+            body.description.as_deref(),
+            body.priority.unwrap_or(0),
+            actor(&headers),
+        )
+        .await;
+    result_response(created, StatusCode::CREATED)
 }
 
 #[derive(Deserialize)]
@@ -231,6 +233,29 @@ async fn ready_tasks(State(state): State<AppState>) -> Response {
     result_response(state.db.ready_tasks().await, StatusCode::OK)
 }
 
+async fn due_tasks(State(state): State<AppState>) -> Response {
+    result_response(state.db.due_tasks(&now_iso()).await, StatusCode::OK)
+}
+
+#[derive(Deserialize)]
+struct MarkDelivered {
+    due_at: String,
+}
+
+async fn mark_delivered(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    headers: HeaderMap,
+    Json(body): Json<MarkDelivered>,
+) -> Response {
+    no_content(
+        state
+            .db
+            .mark_delivered(&id, &body.due_at, actor(&headers))
+            .await,
+    )
+}
+
 async fn get_task(State(state): State<AppState>, AxumPath(id): AxumPath<String>) -> Response {
     result_response(state.db.get_task(&id).await, StatusCode::OK)
 }
@@ -243,6 +268,7 @@ struct UpdateBody {
     description: Option<String>,
     assignee: Option<String>,
     target_branch: Option<String>,
+    due_at: Option<String>,
 }
 
 async fn update_task(
@@ -263,6 +289,7 @@ async fn update_task(
                     description: body.description.as_deref(),
                     assignee: body.assignee.as_deref(),
                     target_branch: body.target_branch.as_deref(),
+                    due_at: body.due_at.as_deref(),
                 },
                 actor(&headers),
             )

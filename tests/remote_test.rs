@@ -76,7 +76,9 @@ async fn record_request(State(state): State<StubState>, request: Request<Body>) 
         }
         path if path.ends_with("/dependencies") && parts.method == "GET" => (200, json!([])),
         path if path.ends_with("/events") => (200, json!([])),
-        path if path == "/tasks" || path == "/tasks/ready" => (200, json!([task_json()])),
+        path if path == "/tasks" || path == "/tasks/ready" || path == "/tasks/due" => {
+            (200, json!([task_json()]))
+        }
         path if path.starts_with("/tasks/") && parts.method == "GET" => (200, task_json()),
         _ => (204, Value::Null),
     };
@@ -247,4 +249,46 @@ async fn api_errors_preserve_typed_messages_and_surface_other_statuses() {
     let error = store.get_task("failure").await.unwrap_err().to_string();
     assert!(error.contains("500"));
     assert!(error.contains("database offline"));
+}
+
+#[tokio::test]
+async fn due_tasks_and_delivery_requests_follow_contract() {
+    let (url, state) = spawn_test_api().await;
+    let store = HttpStore::new(&url, "secret").unwrap();
+
+    let due = store.due_tasks().await.unwrap();
+    store
+        .update_task(
+            "task one",
+            TaskUpdates {
+                due_at: Some("2026-11-15T09:00:00Z"),
+                ..Default::default()
+            },
+            "agent-a",
+        )
+        .await
+        .unwrap();
+    store
+        .mark_delivered("task one", "2026-11-15T09:00:00Z", "supervisor")
+        .await
+        .unwrap();
+
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].due_at, None);
+    let requests = state.0.lock().unwrap();
+    let paths: Vec<(&str, &str)> = requests
+        .iter()
+        .map(|r| (r.method.as_str(), r.path.as_str()))
+        .collect();
+    assert_eq!(
+        paths,
+        vec![
+            ("GET", "/tasks/due"),
+            ("PATCH", "/tasks/task%20one"),
+            ("POST", "/tasks/task%20one/delivered"),
+        ]
+    );
+    assert_eq!(requests[1].body, json!({"due_at": "2026-11-15T09:00:00Z"}));
+    assert_eq!(requests[2].body, json!({"due_at": "2026-11-15T09:00:00Z"}));
+    assert_eq!(requests[2].actor.as_deref(), Some("supervisor"));
 }

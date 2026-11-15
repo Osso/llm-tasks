@@ -625,3 +625,126 @@ async fn claim_missing_task_is_not_found() {
     let error = db.claim_task("lt-none", "a").await.unwrap_err();
     assert!(error.downcast_ref::<NotFound>().is_some());
 }
+
+async fn set_due(db: &Database, id: &str, due_at: &str) {
+    let updates = TaskUpdates {
+        due_at: Some(due_at),
+        ..Default::default()
+    };
+    db.update_task(id, updates, "agent-1").await.unwrap();
+}
+
+#[tokio::test]
+async fn due_tasks_lists_only_open_undelivered_tasks_past_their_due_time() {
+    let (db, _dir) = temp_db().await;
+    let due = db.create_task("Due", None, 0, "agent-1").await.unwrap();
+    let future = db.create_task("Future", None, 0, "agent-1").await.unwrap();
+    let closed = db.create_task("Closed", None, 0, "agent-1").await.unwrap();
+    let delivered = db
+        .create_task("Delivered", None, 0, "agent-1")
+        .await
+        .unwrap();
+    db.create_task("No due time", None, 0, "agent-1")
+        .await
+        .unwrap();
+    set_due(&db, &due.id, "2026-11-15T09:00:00-06:00").await;
+    set_due(&db, &future.id, "2026-11-16T09:00:00Z").await;
+    set_due(&db, &closed.id, "2026-11-15T10:00:00Z").await;
+    set_due(&db, &delivered.id, "2026-11-15T11:00:00Z").await;
+    db.close_task(&closed.id, "agent-1").await.unwrap();
+    db.mark_delivered(&delivered.id, "2026-11-15T11:00:00Z", "supervisor")
+        .await
+        .unwrap();
+
+    let listed = db.due_tasks("2026-11-15T16:00:00Z").await.unwrap();
+
+    let ids: Vec<&str> = listed.iter().map(|task| task.id.as_str()).collect();
+    assert_eq!(ids, vec![due.id.as_str()]);
+    assert_eq!(listed[0].due_at.as_deref(), Some("2026-11-15T15:00:00Z"));
+}
+
+#[tokio::test]
+async fn invalid_due_time_is_rejected_without_change() {
+    let (db, _dir) = temp_db().await;
+    let task = db
+        .create_task("Reminder", None, 0, "agent-1")
+        .await
+        .unwrap();
+    let updates = TaskUpdates {
+        due_at: Some("tomorrow 9am"),
+        ..Default::default()
+    };
+
+    let error = db
+        .update_task(&task.id, updates, "agent-1")
+        .await
+        .unwrap_err();
+
+    assert!(error.downcast_ref::<llm_tasks::db::Invalid>().is_some());
+    assert!(db.get_task(&task.id).await.unwrap().due_at.is_none());
+}
+
+#[tokio::test]
+async fn rescheduling_or_reopening_clears_delivery() {
+    let (db, _dir) = temp_db().await;
+    let task = db
+        .create_task("Reminder", None, 0, "agent-1")
+        .await
+        .unwrap();
+    set_due(&db, &task.id, "2026-11-15T09:00:00Z").await;
+    db.mark_delivered(&task.id, "2026-11-15T09:00:00Z", "supervisor")
+        .await
+        .unwrap();
+    assert!(db.get_task(&task.id).await.unwrap().delivered_at.is_some());
+
+    set_due(&db, &task.id, "2026-11-15T12:00:00Z").await;
+    let rescheduled = db.get_task(&task.id).await.unwrap();
+    assert!(rescheduled.delivered_at.is_none());
+    assert_eq!(db.due_tasks("2026-11-15T13:00:00Z").await.unwrap().len(), 1);
+
+    db.mark_delivered(&task.id, "2026-11-15T12:00:00Z", "supervisor")
+        .await
+        .unwrap();
+    db.close_task(&task.id, "agent-1").await.unwrap();
+    let reopen = TaskUpdates {
+        status: Some("pending"),
+        ..Default::default()
+    };
+    db.update_task(&task.id, reopen, "agent-1").await.unwrap();
+    assert!(db.get_task(&task.id).await.unwrap().delivered_at.is_none());
+}
+
+#[tokio::test]
+async fn mark_delivered_rejects_stale_due_time_and_double_delivery() {
+    let (db, _dir) = temp_db().await;
+    let task = db
+        .create_task("Reminder", None, 0, "agent-1")
+        .await
+        .unwrap();
+    set_due(&db, &task.id, "2026-11-15T09:00:00Z").await;
+
+    let stale = db
+        .mark_delivered(&task.id, "2026-11-14T09:00:00Z", "supervisor")
+        .await
+        .unwrap_err();
+    assert!(stale.downcast_ref::<Conflict>().is_some());
+
+    db.mark_delivered(&task.id, "2026-11-15T09:00:00Z", "supervisor")
+        .await
+        .unwrap();
+    let again = db
+        .mark_delivered(&task.id, "2026-11-15T09:00:00Z", "supervisor")
+        .await
+        .unwrap_err();
+    assert!(again.downcast_ref::<Conflict>().is_some());
+    let missing = db
+        .mark_delivered("lt-missing", "2026-11-15T09:00:00Z", "supervisor")
+        .await
+        .unwrap_err();
+    assert!(missing.downcast_ref::<NotFound>().is_some());
+
+    let events = db.get_events(&task.id).await.unwrap();
+    let delivered = events.iter().find(|e| e.action == "delivered").unwrap();
+    assert_eq!(delivered.actor, "supervisor");
+    assert_eq!(delivered.new_value.as_deref(), Some("2026-11-15T09:00:00Z"));
+}
