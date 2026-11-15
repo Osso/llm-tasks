@@ -479,3 +479,103 @@ async fn due_tasks_and_delivery_acknowledgement_over_http() {
         .unwrap();
     assert!(after.is_empty());
 }
+
+#[tokio::test]
+async fn attachments_and_questions_through_the_http_client() {
+    use llm_tasks::{
+        attachments::{MAX_ATTACHMENT_BYTES, NewAttachment},
+        db::{Conflict, Invalid},
+        questions::{Question, QuestionOption},
+        remote::HttpStore,
+        store::TaskStore,
+    };
+    let (base, client, _dir) = start_server().await;
+    let store = HttpStore::new(&base, TOKEN).unwrap();
+    let task = store
+        .create_task("Remote", None, 2, "agent-a")
+        .await
+        .unwrap();
+
+    let data = "résumé ✓".as_bytes();
+    let file = NewAttachment {
+        name: "notes ✓.md",
+        mime_type: "text/markdown",
+        data,
+    };
+    let attached = store
+        .add_attachment(&task.id, file, "agent-a")
+        .await
+        .unwrap();
+    let (meta, bytes) = store.get_attachment(attached.id).await.unwrap();
+    assert_eq!(bytes, data);
+    assert_eq!(meta.name, "notes ✓.md");
+    assert_eq!(meta.actor, "agent-a");
+    let raw = request(
+        &client,
+        reqwest::Method::GET,
+        format!("{base}/attachments/{}", attached.id),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(raw.headers()["content-type"], "text/markdown");
+    let big = vec![b'x'; MAX_ATTACHMENT_BYTES + 1];
+    let oversized = request(
+        &client,
+        reqwest::Method::POST,
+        format!("{base}/tasks/{}/attachments?name=big.bin", task.id),
+    )
+    .body(big)
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(oversized.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+
+    let questions = vec![Question {
+        question: "Ship now?".to_owned(),
+        header: Some("Ship".to_owned()),
+        options: ["Yes", "No"]
+            .iter()
+            .map(|label| QuestionOption {
+                label: (*label).to_owned(),
+                description: None,
+            })
+            .collect(),
+        multi_select: false,
+    }];
+    let invalid = store
+        .ask_questions(&task.id, vec![], "agent-a")
+        .await
+        .unwrap_err();
+    assert!(invalid.downcast_ref::<Invalid>().is_some());
+    let set = store
+        .ask_questions(&task.id, questions, "agent-a")
+        .await
+        .unwrap();
+    assert!(store.ready_tasks().await.unwrap().is_empty());
+    let answer: llm_tasks::questions::Answers = [("Ship now?".to_owned(), "Yes".to_owned())].into();
+    store
+        .answer_questions(set.id, answer.clone(), "orchestrator")
+        .await
+        .unwrap();
+    let conflict = store
+        .answer_questions(set.id, answer.clone(), "orchestrator")
+        .await
+        .unwrap_err();
+    assert!(conflict.downcast_ref::<Conflict>().is_some());
+    let sets = store.list_questions(&task.id).await.unwrap();
+    assert_eq!(sets[0].answers.as_ref(), Some(&answer));
+    assert_eq!(store.ready_tasks().await.unwrap().len(), 1);
+    let raw_set: Value = request(
+        &client,
+        reqwest::Method::GET,
+        format!("{base}/tasks/{}/questions", task.id),
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(raw_set[0]["questions"][0]["multiSelect"], false);
+}

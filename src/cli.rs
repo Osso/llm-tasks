@@ -132,6 +132,58 @@ pub enum Command {
         content: String,
     },
 
+    /// Attach a file (max 10 MiB) to a task
+    Attach {
+        /// Task ID
+        id: String,
+        /// File to upload
+        path: PathBuf,
+        /// Stored name (default: the file name)
+        #[arg(long)]
+        name: Option<String>,
+        /// Content type (default: guessed from the extension)
+        #[arg(long)]
+        mime: Option<String>,
+    },
+
+    /// List a task's attachments
+    Attachments {
+        /// Task ID
+        id: String,
+    },
+
+    /// Download an attachment
+    Attachment {
+        /// Attachment ID
+        id: i64,
+        /// Write to this file instead of stdout
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+
+    /// Ask structured questions on a task; it is not ready until they are answered
+    Ask {
+        /// Task ID
+        id: String,
+        /// JSON array in the ask_questions shape, or - for stdin:
+        /// [{"question","header"?,"options"?:[{"label","description"?}],"multiSelect"?}]
+        questions: String,
+    },
+
+    /// List a task's question sets and answers
+    Questions {
+        /// Task ID
+        id: String,
+    },
+
+    /// Answer a question set
+    Answer {
+        /// Question set ID
+        id: i64,
+        /// JSON object {"<question text>": "<answer>"} covering every question, or - for stdin
+        answers: String,
+    },
+
     /// Show task event history
     History {
         /// Task ID

@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use crate::id;
 
 pub struct Database {
-    conn: Arc<Mutex<Connection>>,
+    pub(crate) conn: Arc<Mutex<Connection>>,
 }
 
 /// The requested task does not exist. Carried inside `anyhow::Error`; the HTTP
@@ -218,9 +218,11 @@ impl Database {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let c = conn.lock().unwrap();
-            let sql = "SELECT t.id, t.title, t.description, t.status, t.priority, t.assignee, t.target_branch, t.created_at, t.updated_at, t.due_at, t.delivered_at FROM tasks t WHERE t.status IN ('pending', 'ready') AND t.assignee IS NULL AND t.id NOT IN (SELECT d.task_id FROM dependencies d JOIN tasks bt ON d.depends_on = bt.id WHERE bt.status NOT IN ('completed', 'done')) ORDER BY t.priority DESC, t.created_at ASC";
+            // Claimable: open, unassigned, no open blocker, no unanswered question set,
+            // and not a reminder that is still in the future.
+            let sql = "SELECT t.id, t.title, t.description, t.status, t.priority, t.assignee, t.target_branch, t.created_at, t.updated_at, t.due_at, t.delivered_at FROM tasks t WHERE t.status IN ('pending', 'ready') AND t.assignee IS NULL AND t.id NOT IN (SELECT d.task_id FROM dependencies d JOIN tasks bt ON d.depends_on = bt.id WHERE bt.status NOT IN ('completed', 'done')) AND NOT EXISTS (SELECT 1 FROM task_questions q WHERE q.task_id = t.id AND q.answered_at IS NULL) AND (t.due_at IS NULL OR t.due_at <= ?1) ORDER BY t.priority DESC, t.created_at ASC";
             let mut stmt = c.prepare(sql)?;
-            let mut rows = stmt.query([])?;
+            let mut rows = stmt.query(params![now_iso()])?;
             collect_tasks(&mut rows)
         })
         .await?
@@ -458,6 +460,14 @@ impl Database {
             c.execute("DELETE FROM events WHERE task_id = ?1", params![&id])?;
             c.execute("DELETE FROM comments WHERE task_id = ?1", params![&id])?;
             c.execute(
+                "DELETE FROM task_attachments WHERE task_id = ?1",
+                params![&id],
+            )?;
+            c.execute(
+                "DELETE FROM task_questions WHERE task_id = ?1",
+                params![&id],
+            )?;
+            c.execute(
                 "DELETE FROM dependencies WHERE task_id = ?1 OR depends_on = ?1",
                 params![&id],
             )?;
@@ -555,6 +565,16 @@ const SCHEMA: &str = "
         actor TEXT NOT NULL, action TEXT NOT NULL, field TEXT,
         old_value TEXT, new_value TEXT, timestamp TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS task_attachments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL REFERENCES tasks(id),
+        name TEXT NOT NULL, mime_type TEXT NOT NULL, size INTEGER NOT NULL, data BLOB NOT NULL,
+        actor TEXT NOT NULL, created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS task_questions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL REFERENCES tasks(id),
+        actor TEXT NOT NULL, questions TEXT NOT NULL, answers TEXT, answered_by TEXT,
+        created_at TEXT NOT NULL, answered_at TEXT
+    );
     CREATE TABLE IF NOT EXISTS comments (
         id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL REFERENCES tasks(id),
         actor TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL
@@ -596,7 +616,7 @@ fn event_from_row(row: &rusqlite::Row) -> rusqlite::Result<Event> {
     })
 }
 
-fn record_event(
+pub(crate) fn record_event(
     conn: &Connection,
     task_id: &str,
     actor: &str,

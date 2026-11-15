@@ -5,7 +5,9 @@ use reqwest::{Method, Response, StatusCode, Url};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::db::{Comment, Conflict, Dependency, Event, NotFound, Task, TaskUpdates};
+use crate::attachments::{Attachment, NewAttachment};
+use crate::db::{Comment, Conflict, Dependency, Event, Invalid, NotFound, Task, TaskUpdates};
+use crate::questions::{Answers, Question, QuestionSet};
 use crate::store::TaskStore;
 
 pub struct HttpStore {
@@ -82,6 +84,7 @@ async fn decode_response<T: DeserializeOwned>(response: Response) -> Result<T> {
         return Err(match status {
             StatusCode::NOT_FOUND => anyhow::Error::from(NotFound(message)),
             StatusCode::CONFLICT => anyhow::Error::from(Conflict(message)),
+            StatusCode::BAD_REQUEST => anyhow::Error::from(Invalid(message)),
             _ => anyhow::anyhow!("HTTP {}: {}", status, message),
         });
     }
@@ -128,6 +131,16 @@ struct TaskUpdate<'a> {
     target_branch: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     due_at: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct AskQuestions {
+    questions: Vec<Question>,
+}
+
+#[derive(Serialize)]
+struct AnswerQuestions {
+    answers: Answers,
 }
 
 #[derive(Serialize)]
@@ -314,6 +327,90 @@ impl TaskStore for HttpStore {
             &format!("tasks/{}/events", segment(task_id)),
             None,
             None::<serde_json::Value>,
+        )
+        .await
+    }
+
+    async fn add_attachment(
+        &self,
+        task_id: &str,
+        file: NewAttachment<'_>,
+        actor: &str,
+    ) -> Result<Attachment> {
+        let mut url = self.url(&format!("tasks/{}/attachments", segment(task_id)))?;
+        url.query_pairs_mut().append_pair("name", file.name);
+        let request = self
+            .client
+            .post(url)
+            .bearer_auth(&self.token)
+            .header("X-LT-Actor", actor)
+            .header(reqwest::header::CONTENT_TYPE, file.mime_type)
+            .body(file.data.to_vec());
+        decode_response(request.send().await?).await
+    }
+
+    async fn list_attachments(&self, task_id: &str) -> Result<Vec<Attachment>> {
+        self.send(
+            Method::GET,
+            &format!("tasks/{}/attachments", segment(task_id)),
+            None,
+            None::<serde_json::Value>,
+        )
+        .await
+    }
+
+    /// Metadata comes from the task's attachment list; the route returns only bytes.
+    async fn get_attachment(&self, id: i64) -> Result<(Attachment, Vec<u8>)> {
+        let url = self.url(&format!("attachments/{id}"))?;
+        let response = self.client.get(url).bearer_auth(&self.token).send().await?;
+        if !response.status().is_success() {
+            return decode_response::<serde_json::Value>(response)
+                .await
+                .and_then(|_| anyhow::bail!("attachment {id}: unexpected empty error"));
+        }
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        };
+        let metadata = header("x-lt-attachment").context("missing X-LT-Attachment header")?;
+        let attachment: Attachment = serde_json::from_str(&metadata)?;
+        Ok((attachment, response.bytes().await?.to_vec()))
+    }
+
+    async fn ask_questions(
+        &self,
+        task_id: &str,
+        questions: Vec<Question>,
+        actor: &str,
+    ) -> Result<QuestionSet> {
+        self.send(
+            Method::POST,
+            &format!("tasks/{}/questions", segment(task_id)),
+            Some(actor),
+            Some(AskQuestions { questions }),
+        )
+        .await
+    }
+
+    async fn list_questions(&self, task_id: &str) -> Result<Vec<QuestionSet>> {
+        self.send(
+            Method::GET,
+            &format!("tasks/{}/questions", segment(task_id)),
+            None,
+            None::<serde_json::Value>,
+        )
+        .await
+    }
+
+    async fn answer_questions(&self, id: i64, answers: Answers, actor: &str) -> Result<()> {
+        self.send_empty(
+            Method::POST,
+            &format!("questions/{id}/answer"),
+            Some(actor),
+            Some(AnswerQuestions { answers }),
         )
         .await
     }

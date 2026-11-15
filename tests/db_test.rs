@@ -748,3 +748,163 @@ async fn mark_delivered_rejects_stale_due_time_and_double_delivery() {
     assert_eq!(delivered.actor, "supervisor");
     assert_eq!(delivered.new_value.as_deref(), Some("2026-11-15T09:00:00Z"));
 }
+
+fn question(text: &str, options: &[&str]) -> llm_tasks::questions::Question {
+    llm_tasks::questions::Question {
+        question: text.to_owned(),
+        header: None,
+        options: options
+            .iter()
+            .map(|label| llm_tasks::questions::QuestionOption {
+                label: (*label).to_owned(),
+                description: None,
+            })
+            .collect(),
+        multi_select: false,
+    }
+}
+
+fn answers(pairs: &[(&str, &str)]) -> llm_tasks::questions::Answers {
+    pairs
+        .iter()
+        .map(|(q, a)| ((*q).to_owned(), (*a).to_owned()))
+        .collect()
+}
+
+#[tokio::test]
+async fn unanswered_questions_keep_a_task_out_of_ready_until_answered() {
+    let (db, _dir) = temp_db().await;
+    let task = db
+        .create_task("Migrate DB", None, 1, "agent-1")
+        .await
+        .unwrap();
+    let asked = db
+        .ask_questions(
+            &task.id,
+            vec![
+                question("Which engine?", &["Postgres", "SQLite"]),
+                question("Deadline?", &[]),
+            ],
+            "agent-1",
+        )
+        .await
+        .unwrap();
+    assert!(db.ready_tasks().await.unwrap().is_empty());
+
+    let partial = db
+        .answer_questions(
+            asked.id,
+            answers(&[("Which engine?", "SQLite")]),
+            "orchestrator",
+        )
+        .await
+        .unwrap_err();
+    assert!(partial.downcast_ref::<llm_tasks::db::Invalid>().is_some());
+    let full = answers(&[("Which engine?", "SQLite"), ("Deadline?", "Friday")]);
+    db.answer_questions(asked.id, full.clone(), "orchestrator")
+        .await
+        .unwrap();
+
+    let ready: Vec<String> = db
+        .ready_tasks()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|t| t.id)
+        .collect();
+    assert_eq!(ready, vec![task.id.clone()]);
+    let sets = db.list_questions(&task.id).await.unwrap();
+    assert_eq!(sets[0].answers.as_ref(), Some(&full));
+    assert_eq!(sets[0].answered_by.as_deref(), Some("orchestrator"));
+    let again = db
+        .answer_questions(asked.id, full, "orchestrator")
+        .await
+        .unwrap_err();
+    assert!(again.downcast_ref::<Conflict>().is_some());
+    let actions: Vec<String> = db
+        .get_events(&task.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| e.action)
+        .collect();
+    assert!(actions.contains(&"asked".to_owned()) && actions.contains(&"answered".to_owned()));
+}
+
+#[tokio::test]
+async fn malformed_question_sets_are_rejected() {
+    let (db, _dir) = temp_db().await;
+    let task = db.create_task("Task", None, 0, "agent-1").await.unwrap();
+    let cases = vec![
+        vec![],
+        vec![question("One option?", &["Only"])],
+        vec![question("Duplicate labels?", &["A", "A"])],
+        vec![question("Same", &[]), question("Same", &[])],
+        vec![question(" ", &[])],
+    ];
+    for questions in cases {
+        let error = db
+            .ask_questions(&task.id, questions, "agent-1")
+            .await
+            .unwrap_err();
+        assert!(
+            error.downcast_ref::<llm_tasks::db::Invalid>().is_some(),
+            "{error}"
+        );
+    }
+    assert!(db.list_questions(&task.id).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn reminders_are_not_ready_before_their_due_time() {
+    let (db, _dir) = temp_db().await;
+    let future = db.create_task("Later", None, 0, "agent-1").await.unwrap();
+    let past = db.create_task("Overdue", None, 0, "agent-1").await.unwrap();
+    set_due(&db, &future.id, "2099-01-01T00:00:00Z").await;
+    set_due(&db, &past.id, "2020-01-01T00:00:00Z").await;
+
+    let ready: Vec<String> = db
+        .ready_tasks()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|t| t.id)
+        .collect();
+
+    assert_eq!(ready, vec![past.id]);
+}
+
+#[tokio::test]
+async fn attachments_round_trip_and_respect_the_size_cap() {
+    use llm_tasks::attachments::{MAX_ATTACHMENT_BYTES, NewAttachment};
+    let (db, _dir) = temp_db().await;
+    let task = db.create_task("Logs", None, 0, "agent-1").await.unwrap();
+    let data = b"line 1\nline 2\n";
+    let file = NewAttachment {
+        name: "build.log",
+        mime_type: "text/plain",
+        data,
+    };
+    let attached = db.add_attachment(&task.id, file, "agent-1").await.unwrap();
+
+    let (meta, bytes) = db.get_attachment(attached.id).await.unwrap();
+    assert_eq!(bytes, data);
+    assert_eq!(meta.name, "build.log");
+    assert_eq!(meta.size, data.len() as i64);
+    assert_eq!(db.list_attachments(&task.id).await.unwrap(), vec![meta]);
+
+    let big = vec![0u8; MAX_ATTACHMENT_BYTES + 1];
+    let oversized = NewAttachment {
+        name: "big.bin",
+        mime_type: "application/octet-stream",
+        data: &big,
+    };
+    let error = db
+        .add_attachment(&task.id, oversized, "agent-1")
+        .await
+        .unwrap_err();
+    assert!(error.downcast_ref::<llm_tasks::db::Invalid>().is_some());
+    let missing = db.get_attachment(9999).await.unwrap_err();
+    assert!(missing.downcast_ref::<NotFound>().is_some());
+    assert_eq!(db.list_attachments(&task.id).await.unwrap().len(), 1);
+}

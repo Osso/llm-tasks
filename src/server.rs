@@ -9,8 +9,12 @@ use std::{
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Path as AxumPath, Query, State},
-    http::{HeaderMap, Request, StatusCode, header::AUTHORIZATION},
+    body::Bytes,
+    extract::{DefaultBodyLimit, Path as AxumPath, Query, State},
+    http::{
+        HeaderMap, HeaderValue, Request, StatusCode,
+        header::{AUTHORIZATION, CONTENT_DISPOSITION, CONTENT_TYPE},
+    },
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -18,7 +22,9 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::attachments::{MAX_ATTACHMENT_BYTES, NewAttachment};
 use crate::db::{Conflict, Database, Invalid, NotFound, TaskUpdates, now_iso};
+use crate::questions::{Answers, Question};
 
 #[derive(Clone)]
 struct AppState {
@@ -54,6 +60,18 @@ pub fn router(db: Database, tokens: Vec<String>, rules_file: Option<PathBuf>) ->
         )
         .route("/tasks/{id}/comments", get(get_comments).post(add_comment))
         .route("/tasks/{id}/events", get(get_events))
+        .route(
+            "/tasks/{id}/attachments",
+            get(list_attachments)
+                .post(add_attachment)
+                .layer(DefaultBodyLimit::max(MAX_ATTACHMENT_BYTES)),
+        )
+        .route("/attachments/{id}", get(get_attachment))
+        .route(
+            "/tasks/{id}/questions",
+            get(list_questions).post(ask_questions),
+        )
+        .route("/questions/{id}/answer", post(answer_questions))
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(state, authorize))
 }
@@ -388,4 +406,120 @@ async fn events_after(State(state): State<AppState>, Query(query): Query<EventsA
 
 async fn get_events(State(state): State<AppState>, AxumPath(id): AxumPath<String>) -> Response {
     result_response(state.db.get_events(&id).await, StatusCode::OK)
+}
+
+#[derive(Deserialize)]
+struct AttachmentName {
+    name: String,
+}
+
+async fn add_attachment(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<AttachmentName>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let mime_type = headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/octet-stream");
+    let file = NewAttachment {
+        name: &query.name,
+        mime_type,
+        data: &body,
+    };
+    result_response(
+        state.db.add_attachment(&id, file, actor(&headers)).await,
+        StatusCode::CREATED,
+    )
+}
+
+async fn list_attachments(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    result_response(state.db.list_attachments(&id).await, StatusCode::OK)
+}
+
+/// JSON with every non-ASCII character escaped, so it is a valid header value.
+fn ascii_json(value: &impl serde::Serialize) -> String {
+    let json = serde_json::to_string(value).unwrap_or_default();
+    json.chars().fold(String::new(), |mut out, c| {
+        if c.is_ascii() {
+            out.push(c);
+        } else {
+            for unit in c.encode_utf16(&mut [0; 2]) {
+                out.push_str(&format!("\\u{unit:04x}"));
+            }
+        }
+        out
+    })
+}
+
+/// The file bytes, with its metadata in `X-LT-Attachment` (JSON).
+async fn get_attachment(State(state): State<AppState>, AxumPath(id): AxumPath<i64>) -> Response {
+    let (attachment, data) = match state.db.get_attachment(id).await {
+        Ok(found) => found,
+        Err(error) => return error_response(error),
+    };
+    let header = |text: String| {
+        HeaderValue::from_str(&text).unwrap_or_else(|_| HeaderValue::from_static(""))
+    };
+    let disposition = format!(
+        "attachment; filename=\"{}\"",
+        attachment.name.escape_default()
+    );
+    let headers = [
+        (CONTENT_TYPE, header(attachment.mime_type.clone())),
+        (CONTENT_DISPOSITION, header(disposition)),
+    ];
+    let mut response = (headers, data).into_response();
+    response
+        .headers_mut()
+        .insert("x-lt-attachment", header(ascii_json(&attachment)));
+    response
+}
+
+#[derive(Deserialize)]
+struct AskQuestions {
+    questions: Vec<Question>,
+}
+
+async fn ask_questions(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    headers: HeaderMap,
+    Json(body): Json<AskQuestions>,
+) -> Response {
+    result_response(
+        state
+            .db
+            .ask_questions(&id, body.questions, actor(&headers))
+            .await,
+        StatusCode::CREATED,
+    )
+}
+
+async fn list_questions(State(state): State<AppState>, AxumPath(id): AxumPath<String>) -> Response {
+    result_response(state.db.list_questions(&id).await, StatusCode::OK)
+}
+
+#[derive(Deserialize)]
+struct AnswerQuestions {
+    answers: Answers,
+}
+
+async fn answer_questions(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<i64>,
+    headers: HeaderMap,
+    Json(body): Json<AnswerQuestions>,
+) -> Response {
+    no_content(
+        state
+            .db
+            .answer_questions(id, body.answers, actor(&headers))
+            .await,
+    )
 }

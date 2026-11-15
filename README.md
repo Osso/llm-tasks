@@ -11,6 +11,9 @@ lt create "Fix login" -p 2      # prints the new id, e.g. lt-a1b2
 lt ready                        # unblocked, unassigned tasks
 lt create "Recheck advisories" --due 2026-11-15T09:00:00-06:00   # a reminder
 lt due                          # reminders past due, not yet delivered
+lt attach lt-a1b2 build.log     # file stored with the task (max 10 MiB)
+lt ask lt-a1b2 '[{"question":"Which DB?","options":[{"label":"SQLite"},{"label":"Postgres"}]}]'
+lt answer 1 '{"Which DB?":"SQLite"}'   # the task is not ready until answered
 lt claim lt-a1b2 --actor me     # atomic: exactly one claimer wins
 lt close lt-a1b2
 ```

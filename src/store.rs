@@ -6,7 +6,9 @@ use std::future::Future;
 
 use anyhow::Result;
 
+use crate::attachments::{Attachment, NewAttachment};
 use crate::db::{Comment, Database, Dependency, Event, Task, TaskUpdates};
+use crate::questions::{Answers, Question, QuestionSet};
 
 pub trait TaskStore {
     fn create_task(
@@ -62,6 +64,34 @@ pub trait TaskStore {
     ) -> impl Future<Output = Result<Comment>> + Send;
     fn get_comments(&self, task_id: &str) -> impl Future<Output = Result<Vec<Comment>>> + Send;
     fn get_events(&self, task_id: &str) -> impl Future<Output = Result<Vec<Event>>> + Send;
+    fn add_attachment(
+        &self,
+        task_id: &str,
+        file: NewAttachment<'_>,
+        actor: &str,
+    ) -> impl Future<Output = Result<Attachment>> + Send;
+    fn list_attachments(
+        &self,
+        task_id: &str,
+    ) -> impl Future<Output = Result<Vec<Attachment>>> + Send;
+    fn get_attachment(&self, id: i64)
+    -> impl Future<Output = Result<(Attachment, Vec<u8>)>> + Send;
+    fn ask_questions(
+        &self,
+        task_id: &str,
+        questions: Vec<Question>,
+        actor: &str,
+    ) -> impl Future<Output = Result<QuestionSet>> + Send;
+    fn list_questions(
+        &self,
+        task_id: &str,
+    ) -> impl Future<Output = Result<Vec<QuestionSet>>> + Send;
+    fn answer_questions(
+        &self,
+        id: i64,
+        answers: Answers,
+        actor: &str,
+    ) -> impl Future<Output = Result<()>> + Send;
 }
 
 impl TaskStore for Database {
@@ -129,5 +159,39 @@ impl TaskStore for Database {
 
     async fn get_events(&self, task_id: &str) -> Result<Vec<Event>> {
         Database::get_events(self, task_id).await
+    }
+
+    async fn add_attachment(
+        &self,
+        task_id: &str,
+        file: NewAttachment<'_>,
+        actor: &str,
+    ) -> Result<Attachment> {
+        Database::add_attachment(self, task_id, file, actor).await
+    }
+
+    async fn list_attachments(&self, task_id: &str) -> Result<Vec<Attachment>> {
+        Database::list_attachments(self, task_id).await
+    }
+
+    async fn get_attachment(&self, id: i64) -> Result<(Attachment, Vec<u8>)> {
+        Database::get_attachment(self, id).await
+    }
+
+    async fn ask_questions(
+        &self,
+        task_id: &str,
+        questions: Vec<Question>,
+        actor: &str,
+    ) -> Result<QuestionSet> {
+        Database::ask_questions(self, task_id, questions, actor).await
+    }
+
+    async fn list_questions(&self, task_id: &str) -> Result<Vec<QuestionSet>> {
+        Database::list_questions(self, task_id).await
+    }
+
+    async fn answer_questions(&self, id: i64, answers: Answers, actor: &str) -> Result<()> {
+        Database::answer_questions(self, id, answers, actor).await
     }
 }

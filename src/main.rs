@@ -1,5 +1,7 @@
+use llm_tasks::attachments::{NewAttachment, guess_mime_type};
 use llm_tasks::cli::{Cli, Command, DepCommand};
 use llm_tasks::db::{Database, Dependency, Event, Task, TaskUpdates, normalize_due_at};
+use llm_tasks::questions::QuestionSet;
 use llm_tasks::remote::HttpStore;
 use llm_tasks::server;
 use llm_tasks::store::TaskStore;
@@ -134,6 +136,41 @@ async fn handle_task_command(
         }
         Command::Dep { command } => cmd_dep(context.db, command).await?,
         Command::History { id } => cmd_history(context.db, &id, context.json).await?,
+        Command::Attach {
+            id,
+            path,
+            name,
+            mime,
+        } => cmd_attach(context, &id, &path, name, mime).await?,
+        Command::Attachments { id } => {
+            let attachments = context.db.list_attachments(&id).await?;
+            print_json_or(context.json, &attachments, |a| {
+                format!("{} {} {} {} bytes", a.id, a.name, a.mime_type, a.size)
+            })?
+        }
+        Command::Attachment { id, output } => cmd_attachment(context.db, id, output).await?,
+        Command::Ask { id, questions } => {
+            let questions = serde_json::from_str(&read_arg(&questions)?)?;
+            let set = context
+                .db
+                .ask_questions(&id, questions, context.actor)
+                .await?;
+            print_json_or(context.json, &[set], |s| {
+                format!("Asked question set {} on {}", s.id, s.task_id)
+            })?
+        }
+        Command::Questions { id } => {
+            let sets = context.db.list_questions(&id).await?;
+            print_json_or(context.json, &sets, format_question_set)?
+        }
+        Command::Answer { id, answers } => {
+            let answers = serde_json::from_str(&read_arg(&answers)?)?;
+            context
+                .db
+                .answer_questions(id, answers, context.actor)
+                .await?;
+            println!("Answered question set {}", id);
+        }
         _ => unreachable!("task command router received a core command"),
     }
     Ok(())
@@ -229,13 +266,23 @@ async fn cmd_show(db: &impl TaskStore, id: &str, json: bool) -> anyhow::Result<(
     let task = db.get_task(id).await?;
     let deps = db.get_dependencies(id).await?;
     let comments = db.get_comments(id).await?;
+    let attachments = db.list_attachments(id).await?;
+    let questions = db.list_questions(id).await?;
     if json {
         let mut val = serde_json::to_value(&task)?;
         val["dependencies"] = serde_json::to_value(&deps)?;
         val["comments"] = serde_json::to_value(&comments)?;
+        val["attachments"] = serde_json::to_value(&attachments)?;
+        val["questions"] = serde_json::to_value(&questions)?;
         println!("{}", serde_json::to_string_pretty(&val)?);
     } else {
         print_task(&task, &deps);
+        for a in &attachments {
+            println!("File:     {} {} ({} bytes)", a.id, a.name, a.size);
+        }
+        for set in &questions {
+            println!("{}", format_question_set(set));
+        }
         for c in &comments {
             println!("  [{} @{}] {}", c.created_at, c.actor, c.content);
         }
@@ -333,4 +380,92 @@ fn event_detail(e: &Event) -> String {
         (Some(f), None, Some(new)) => format!("{}: {}", f, new),
         _ => String::new(),
     }
+}
+
+/// The argument itself, or stdin when it is `-`.
+fn read_arg(value: &str) -> anyhow::Result<String> {
+    if value != "-" {
+        return Ok(value.to_owned());
+    }
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
+    Ok(text)
+}
+
+fn print_json_or<T: serde::Serialize>(
+    json: bool,
+    items: &[T],
+    line: impl Fn(&T) -> String,
+) -> anyhow::Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(items)?);
+    } else {
+        items.iter().for_each(|item| println!("{}", line(item)));
+    }
+    Ok(())
+}
+
+fn format_question_set(set: &QuestionSet) -> String {
+    let status = match &set.answered_by {
+        Some(who) => format!("answered by {who}"),
+        None => "unanswered".to_owned(),
+    };
+    let mut text = format!("#{} [{}] asked by {}", set.id, status, set.actor);
+    for question in &set.questions {
+        let options: Vec<&str> = question.options.iter().map(|o| o.label.as_str()).collect();
+        text.push_str(&format!("\n  Q: {}", question.question));
+        if !options.is_empty() {
+            text.push_str(&format!(" [{}]", options.join(" | ")));
+        }
+        if let Some(answer) = set.answers.as_ref().and_then(|a| a.get(&question.question)) {
+            text.push_str(&format!("\n  A: {answer}"));
+        }
+    }
+    text
+}
+
+async fn cmd_attach(
+    context: &CommandContext<'_, impl TaskStore>,
+    id: &str,
+    path: &std::path::Path,
+    name: Option<String>,
+    mime: Option<String>,
+) -> anyhow::Result<()> {
+    let data = std::fs::read(path)?;
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let name = name.unwrap_or_else(|| file_name.to_owned());
+    let mime_type = mime.unwrap_or_else(|| guess_mime_type(&name).to_owned());
+    let file = NewAttachment {
+        name: &name,
+        mime_type: &mime_type,
+        data: &data,
+    };
+    let attachment = context.db.add_attachment(id, file, context.actor).await?;
+    print_json_or(context.json, &[attachment], |a| {
+        format!(
+            "Attached {} {} ({} bytes) to {}",
+            a.id, a.name, a.size, a.task_id
+        )
+    })
+}
+
+async fn cmd_attachment(
+    db: &impl TaskStore,
+    id: i64,
+    output: Option<std::path::PathBuf>,
+) -> anyhow::Result<()> {
+    let (attachment, data) = db.get_attachment(id).await?;
+    match output {
+        Some(path) => {
+            std::fs::write(&path, &data)?;
+            eprintln!(
+                "Wrote {} ({} bytes) to {}",
+                attachment.name,
+                data.len(),
+                path.display()
+            );
+        }
+        None => std::io::Write::write_all(&mut std::io::stdout(), &data)?,
+    }
+    Ok(())
 }
