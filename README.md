@@ -37,8 +37,8 @@ the sakuin droplet as `tasks.sakuin.org` (`sakuin/ops/nixos/llm-tasks.nix`).
 `lt serve --ui-addr <ip:port>` adds a second listener with a web dashboard
 (`ui/index.html`, compiled into the binary) and the same API without bearer auth.
 Bind it only to an address the network already restricts. Production binds it to
-the droplet's home-WireGuard address: `http://192.168.5.4:8096/`. Writes from the
-page are recorded with actor `web`.
+the droplet's home-WireGuard address, `http://192.168.5.4:8096/`; the home router
+allows only aso to reach it. Writes from the page are recorded with actor `web`.
 
 ## Install
 
