@@ -32,6 +32,14 @@ LT_URL=https://tasks.example LT_TOKEN=... lt ready    # same commands, remote st
 contract is [docs/specs/http-api.md](docs/specs/http-api.md). Production runs on
 the sakuin droplet as `tasks.sakuin.org` (`sakuin/ops/nixos/llm-tasks.nix`).
 
+## Dashboard
+
+`lt serve --ui-addr <ip:port>` adds a second listener with a web dashboard
+(`ui/index.html`, compiled into the binary) and the same API without bearer auth.
+Bind it only to an address the network already restricts. Production binds it to
+the droplet's home-WireGuard address: `http://192.168.5.4:8096/`. Writes from the
+page are recorded with actor `web`.
+
 ## Install
 
 `./deploy.sh` installs `lt` into `~/.local/bin`.

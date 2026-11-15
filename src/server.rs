@@ -33,12 +33,42 @@ struct AppState {
     rules_file: Option<Arc<PathBuf>>,
 }
 
+/// The token-protected API, as published through the Cloudflare tunnel.
 pub fn router(db: Database, tokens: Vec<String>, rules_file: Option<PathBuf>) -> Router {
-    let state = AppState {
-        db: Arc::new(db),
+    authorized_api(app_state(Arc::new(db), tokens, rules_file))
+}
+
+/// The dashboard at `/` plus the API without bearer auth. Bind it only to an
+/// interface that the network already restricts (the home WireGuard tunnel).
+pub fn ui_router(db: Database, rules_file: Option<PathBuf>) -> Router {
+    dashboard(app_state(Arc::new(db), Vec::new(), rules_file))
+}
+
+fn app_state(db: Arc<Database>, tokens: Vec<String>, rules_file: Option<PathBuf>) -> AppState {
+    AppState {
+        db,
         tokens: Arc::new(tokens),
         rules_file: rules_file.map(Arc::new),
-    };
+    }
+}
+
+fn authorized_api(state: AppState) -> Router {
+    api(state.clone()).layer(middleware::from_fn_with_state(state, authorize))
+}
+
+fn dashboard(state: AppState) -> Router {
+    api(state).route("/", get(dashboard_page))
+}
+
+async fn dashboard_page() -> Response {
+    (
+        [(CONTENT_TYPE, "text/html; charset=utf-8")],
+        include_str!("../ui/index.html"),
+    )
+        .into_response()
+}
+
+fn api(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/rules", get(rules))
@@ -72,8 +102,7 @@ pub fn router(db: Database, tokens: Vec<String>, rules_file: Option<PathBuf>) ->
             get(list_questions).post(ask_questions),
         )
         .route("/questions/{id}/answer", post(answer_questions))
-        .with_state(state.clone())
-        .layer(middleware::from_fn_with_state(state, authorize))
+        .with_state(state)
 }
 
 pub fn load_tokens(path: &Path) -> anyhow::Result<Vec<String>> {
@@ -93,10 +122,22 @@ pub async fn serve(
     addr: SocketAddr,
     token_file: &Path,
     rules_file: Option<PathBuf>,
+    ui_addr: Option<SocketAddr>,
 ) -> anyhow::Result<()> {
-    let tokens = load_tokens(token_file)?;
+    let state = app_state(Arc::new(db), load_tokens(token_file)?, rules_file);
+    let api_server = serve_router(addr, authorized_api(state.clone()));
+    match ui_addr {
+        Some(ui_addr) => {
+            tokio::try_join!(api_server, serve_router(ui_addr, dashboard(state)))?;
+        }
+        None => api_server.await?,
+    }
+    Ok(())
+}
+
+async fn serve_router(addr: SocketAddr, app: Router) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, router(db, tokens, rules_file))
+    axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
@@ -457,6 +498,27 @@ fn ascii_json(value: &impl serde::Serialize) -> String {
     })
 }
 
+/// RFC 6266: an ASCII `filename` for old clients plus the exact UTF-8 name in `filename*`.
+fn content_disposition(name: &str) -> String {
+    let ascii: String = name
+        .chars()
+        .map(|c| match c {
+            ' '..='~' if c != '"' && c != '\\' => c,
+            _ => '_',
+        })
+        .collect();
+    let encoded: String =
+        name.bytes()
+            .map(|byte| match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' => (byte as char).to_string(),
+                b'!' | b'#' | b'$' | b'&' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|'
+                | b'~' => (byte as char).to_string(),
+                _ => format!("%{byte:02X}"),
+            })
+            .collect();
+    format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{encoded}")
+}
+
 /// The file bytes, with its metadata in `X-LT-Attachment` (JSON).
 async fn get_attachment(State(state): State<AppState>, AxumPath(id): AxumPath<i64>) -> Response {
     let (attachment, data) = match state.db.get_attachment(id).await {
@@ -466,10 +528,7 @@ async fn get_attachment(State(state): State<AppState>, AxumPath(id): AxumPath<i6
     let header = |text: String| {
         HeaderValue::from_str(&text).unwrap_or_else(|_| HeaderValue::from_static(""))
     };
-    let disposition = format!(
-        "attachment; filename=\"{}\"",
-        attachment.name.escape_default()
-    );
+    let disposition = content_disposition(&attachment.name);
     let headers = [
         (CONTENT_TYPE, header(attachment.mime_type.clone())),
         (CONTENT_DISPOSITION, header(disposition)),

@@ -519,6 +519,10 @@ async fn attachments_and_questions_through_the_http_client() {
     .await
     .unwrap();
     assert_eq!(raw.headers()["content-type"], "text/markdown");
+    assert_eq!(
+        raw.headers()["content-disposition"],
+        "attachment; filename=\"notes _.md\"; filename*=UTF-8''notes%20%E2%9C%93.md"
+    );
     let big = vec![b'x'; MAX_ATTACHMENT_BYTES + 1];
     let oversized = request(
         &client,
@@ -578,4 +582,85 @@ async fn attachments_and_questions_through_the_http_client() {
     .await
     .unwrap();
     assert_eq!(raw_set[0]["questions"][0]["multiSelect"], false);
+}
+
+async fn free_addr() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    listener.local_addr().unwrap()
+}
+
+async fn wait_healthy(client: &reqwest::Client, base: &str) {
+    for _ in 0..100 {
+        if client.get(format!("{base}/healthz")).send().await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("{base} never became healthy");
+}
+
+#[tokio::test]
+async fn dashboard_listener_serves_page_and_tokenless_api_over_the_shared_database() {
+    let dir = TempDir::new().unwrap();
+    let db = Database::open(&dir.path().join("tasks.db")).await.unwrap();
+    let token_file = dir.path().join("tokens");
+    std::fs::write(&token_file, format!("{TOKEN}\n")).unwrap();
+    let (api_addr, ui_addr) = (free_addr().await, free_addr().await);
+    tokio::spawn(async move {
+        server::serve(db, api_addr, &token_file, None, Some(ui_addr))
+            .await
+            .unwrap()
+    });
+    let client = reqwest::Client::new();
+    let (api, ui) = (format!("http://{api_addr}"), format!("http://{ui_addr}"));
+    wait_healthy(&client, &api).await;
+    wait_healthy(&client, &ui).await;
+
+    let page = client.get(format!("{ui}/")).send().await.unwrap();
+    assert_eq!(page.status(), reqwest::StatusCode::OK);
+    assert_eq!(page.headers()["content-type"], "text/html; charset=utf-8");
+    assert!(page.text().await.unwrap().contains("<title>Tasks</title>"));
+
+    let created: Value = client
+        .post(format!("{ui}/tasks"))
+        .header("X-LT-Actor", "web")
+        .json(&json!({"title": "made in the dashboard"}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap();
+
+    let through_api: Value = request(&client, reqwest::Method::GET, format!("{api}/tasks/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(through_api["title"], "made in the dashboard");
+    let events: Value = request(
+        &client,
+        reqwest::Method::GET,
+        format!("{api}/tasks/{id}/events"),
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(events[0]["actor"], "web");
+
+    let tokenless_api = client.get(format!("{api}/tasks")).send().await.unwrap();
+    assert_eq!(tokenless_api.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let page_on_api = request(&client, reqwest::Method::GET, format!("{api}/"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page_on_api.status(), reqwest::StatusCode::NOT_FOUND);
 }

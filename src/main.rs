@@ -19,10 +19,11 @@ async fn main() -> anyhow::Result<()> {
         addr,
         token_file,
         rules_file,
+        ui_addr,
     } = &cli.command
     {
         let db = Database::open(&cli.db_path()).await?;
-        return server::serve(db, *addr, token_file, rules_file.clone()).await;
+        return server::serve(db, *addr, token_file, rules_file.clone(), *ui_addr).await;
     }
     match std::env::var("LT_URL") {
         Ok(url) => {

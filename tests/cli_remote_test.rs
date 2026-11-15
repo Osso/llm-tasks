@@ -30,7 +30,7 @@ async fn start_server() -> Server {
         .local_addr()
         .unwrap()
         .port();
-    let child = Command::new(LT)
+    let mut child = Command::new(LT)
         .arg("--db")
         .arg(dir.path().join("tasks.db"))
         .args([
@@ -53,6 +53,8 @@ async fn start_server() -> Server {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    child.kill().unwrap();
+    child.wait().unwrap();
     panic!("lt serve did not become healthy");
 }
 

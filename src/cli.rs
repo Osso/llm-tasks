@@ -201,6 +201,10 @@ pub enum Command {
         /// Markdown served at GET /rules (404 when unset)
         #[arg(long)]
         rules_file: Option<PathBuf>,
+        /// Also serve the web dashboard and the API WITHOUT bearer auth on this
+        /// address; bind it only to a network-restricted interface (WireGuard)
+        #[arg(long)]
+        ui_addr: Option<std::net::SocketAddr>,
     },
 }
 
