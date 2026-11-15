@@ -95,7 +95,7 @@ async fn record_request(State(state): State<StubState>, request: Request<Body>) 
 }
 
 fn task_json() -> Value {
-    json!({"id":"task one","title":"Ship it","description":"details","status":"pending","priority":3,"assignee":null,"target_branch":"main","created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-02T03:04:05Z"})
+    json!({"id":"task one","title":"Ship it","description":"details","status":"pending","priority":3,"assignee":null,"target_branch":"main","project":"test","created_at":"2026-01-02T03:04:05Z","updated_at":"2026-01-02T03:04:05Z"})
 }
 
 fn comment_json() -> Value {
@@ -109,7 +109,7 @@ async fn task_and_comment_responses_deserialize_and_requests_follow_contract() {
     assert!(HttpStore::new(&format!("{url}/"), "secret").is_ok());
 
     let created = store
-        .create_task("Ship it", Some("details"), 3, "agent-a")
+        .create_task("test", "Ship it", Some("details"), 3, "agent-a")
         .await
         .unwrap();
     assert_eq!(created.id, "task one");
@@ -139,7 +139,7 @@ async fn task_and_comment_responses_deserialize_and_requests_follow_contract() {
         .await
         .unwrap();
     store
-        .list_tasks(Some("in progress"), Some("agent-a"))
+        .list_tasks(Some("in progress"), Some("agent-a"), Some("wow-ui-sim"))
         .await
         .unwrap();
     store.ready_tasks().await.unwrap();
@@ -177,7 +177,7 @@ async fn task_and_comment_responses_deserialize_and_requests_follow_contract() {
     assert_eq!(create.actor.as_deref(), Some("agent-a"));
     assert_eq!(
         create.body,
-        json!({"title":"Ship it","description":"details","priority":3})
+        json!({"project":"test","title":"Ship it","description":"details","priority":3})
     );
     let fetched = request("GET", "/tasks/task%20one");
     assert_eq!(fetched.authorization.as_deref(), Some("Bearer secret"));
@@ -190,9 +190,12 @@ async fn task_and_comment_responses_deserialize_and_requests_follow_contract() {
         json!({"title":"Updated","priority":2})
     );
     assert!(
-        request("GET", "/tasks?status=in+progress&assignee=agent-a")
-            .authorization
-            .is_some()
+        request(
+            "GET",
+            "/tasks?status=in+progress&assignee=agent-a&project=wow-ui-sim"
+        )
+        .authorization
+        .is_some()
     );
     assert!(request("GET", "/tasks/ready").authorization.is_some());
     assert_eq!(

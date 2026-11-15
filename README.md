@@ -7,6 +7,7 @@ different hosts share the same tasks.
 ## Local
 
 ```sh
+export LT_PROJECT=sakuin        # every task needs a project (or pass --project)
 lt create "Fix login" -p 2      # prints the new id, e.g. lt-a1b2
 lt ready                        # unblocked, unassigned tasks
 lt create "Recheck advisories" --due 2026-11-15T09:00:00-06:00   # a reminder

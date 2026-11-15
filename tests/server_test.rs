@@ -29,7 +29,7 @@ fn request(
 
 async fn create(client: &reqwest::Client, base: &str, title: &str) -> Value {
     request(client, reqwest::Method::POST, format!("{base}/tasks"))
-        .json(&json!({"title": title, "description": "concrete details", "priority": 3}))
+        .json(&json!({"project": "test", "title": title, "description": "concrete details", "priority": 3}))
         .send()
         .await
         .unwrap()
@@ -492,7 +492,7 @@ async fn attachments_and_questions_through_the_http_client() {
     let (base, client, _dir) = start_server().await;
     let store = HttpStore::new(&base, TOKEN).unwrap();
     let task = store
-        .create_task("Remote", None, 2, "agent-a")
+        .create_task("test", "Remote", None, 2, "agent-a")
         .await
         .unwrap();
 
@@ -624,7 +624,7 @@ async fn dashboard_listener_serves_page_and_tokenless_api_over_the_shared_databa
     let created: Value = client
         .post(format!("{ui}/tasks"))
         .header("X-LT-Actor", "web")
-        .json(&json!({"title": "made in the dashboard"}))
+        .json(&json!({"project": "test", "title": "made in the dashboard"}))
         .send()
         .await
         .unwrap()
@@ -663,4 +663,49 @@ async fn dashboard_listener_serves_page_and_tokenless_api_over_the_shared_databa
         .await
         .unwrap();
     assert_eq!(page_on_api.status(), reqwest::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn create_requires_a_valid_project_and_list_filters_by_it() {
+    let (base, client, _dir) = start_server().await;
+    for (body, message) in [
+        (json!({"title": "no project"}), "project is required"),
+        (
+            json!({"project": "Not Valid", "title": "bad"}),
+            "Invalid project",
+        ),
+    ] {
+        let response = request(&client, reqwest::Method::POST, format!("{base}/tasks"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        let error: Value = response.json().await.unwrap();
+        assert!(
+            error["error"].as_str().unwrap().contains(message),
+            "{error}"
+        );
+    }
+    create(&client, &base, "in test project").await;
+    let other = request(&client, reqwest::Method::POST, format!("{base}/tasks"))
+        .json(&json!({"project": "world-of-osso", "title": "AV window"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(other.status(), reqwest::StatusCode::CREATED);
+    let listed: Value = request(
+        &client,
+        reqwest::Method::GET,
+        format!("{base}/tasks?project=world-of-osso"),
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    assert_eq!(listed[0]["project"], "world-of-osso");
+    assert_eq!(listed[0]["title"], "AV window");
 }

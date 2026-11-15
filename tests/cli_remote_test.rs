@@ -63,6 +63,7 @@ fn lt(server: &Server, token: &str, actor: &str, args: &[&str]) -> Output {
         .env("LT_URL", &server.url)
         .env("LT_TOKEN", token)
         .env("LT_ACTOR", actor)
+        .env("LT_PROJECT", "test")
         .env_remove("LT_DB")
         .args(args)
         .output()

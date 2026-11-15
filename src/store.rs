@@ -13,6 +13,7 @@ use crate::questions::{Answers, Question, QuestionSet};
 pub trait TaskStore {
     fn create_task(
         &self,
+        project: &str,
         title: &str,
         desc: Option<&str>,
         priority: u8,
@@ -23,6 +24,7 @@ pub trait TaskStore {
         &self,
         status: Option<&str>,
         assignee: Option<&str>,
+        project: Option<&str>,
     ) -> impl Future<Output = Result<Vec<Task>>> + Send;
     fn ready_tasks(&self) -> impl Future<Output = Result<Vec<Task>>> + Send;
     fn claim_task(&self, id: &str, actor: &str) -> impl Future<Output = Result<()>> + Send;
@@ -97,20 +99,26 @@ pub trait TaskStore {
 impl TaskStore for Database {
     async fn create_task(
         &self,
+        project: &str,
         title: &str,
         desc: Option<&str>,
         priority: u8,
         actor: &str,
     ) -> Result<Task> {
-        Database::create_task(self, title, desc, priority, actor).await
+        Database::create_task(self, project, title, desc, priority, actor).await
     }
 
     async fn get_task(&self, id: &str) -> Result<Task> {
         Database::get_task(self, id).await
     }
 
-    async fn list_tasks(&self, status: Option<&str>, assignee: Option<&str>) -> Result<Vec<Task>> {
-        Database::list_tasks(self, status, assignee).await
+    async fn list_tasks(
+        &self,
+        status: Option<&str>,
+        assignee: Option<&str>,
+        project: Option<&str>,
+    ) -> Result<Vec<Task>> {
+        Database::list_tasks(self, status, assignee, project).await
     }
 
     async fn ready_tasks(&self) -> Result<Vec<Task>> {

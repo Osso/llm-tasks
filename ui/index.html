@@ -111,7 +111,7 @@ textarea.field { height: auto; padding: 8px; resize: vertical; line-height: 1.5;
 .group-head[aria-expanded="false"] .chev { transform: rotate(-90deg); }
 .row {
   display: grid; align-items: center; gap: 12px;
-  grid-template-columns: 16px 64px 12px minmax(0, 1fr) auto auto 56px;
+  grid-template-columns: 16px 64px 12px 104px minmax(0, 1fr) auto auto 56px;
   height: 36px; padding: 0 16px; border-bottom: 1px solid var(--border);
   cursor: pointer; border-left: 2px solid transparent;
 }
@@ -120,6 +120,10 @@ textarea.field { height: auto; padding: 8px; resize: vertical; line-height: 1.5;
 .row.selected { background: var(--accent-tint); border-left-color: var(--accent); }
 .row .id { color: var(--text-3); font-size: 12px; }
 .row .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .project { font: 12px var(--mono); color: var(--text-2); text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.list.one-project .row .project { display: none; }
+.list.one-project .row { grid-template-columns: 16px 64px 12px minmax(0, 1fr) auto auto 56px; }
+#project { font-weight: 500; }
 .row .assignee { color: var(--text-2); font-size: 12px; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row time { color: var(--text-3); font-size: 12px; text-align: right; }
 .tags { display: flex; gap: 8px; }
@@ -206,7 +210,8 @@ dialog label { display: grid; gap: 4px; color: var(--text-2); }
   .main.with-detail { grid-template-columns: 1fr; }
   .main.with-detail .list { display: none; }
   .row { grid-template-columns: 16px 56px 12px minmax(0, 1fr) 48px; }
-  .row .assignee, .row .tags { display: none; }
+  .row .assignee, .row .tags, .row .project { display: none; }
+  .list.one-project .row { grid-template-columns: 16px 56px 12px minmax(0, 1fr) 48px; }
   .search input { width: 140px; }
   .counts { display: none; }
   .field, .btn, select, textarea { font-size: 16px; }
@@ -217,6 +222,7 @@ dialog label { display: grid; gap: 4px; color: var(--text-2); }
 <div class="app">
   <header class="bar">
     <h1>Tasks</h1>
+    <select class="field" id="project" aria-label="Project"></select>
     <div class="counts" id="counts"></div>
     <div class="search"><input class="field" id="search" type="search" placeholder="Filter" aria-label="Filter tasks by text"><kbd>/</kbd></div>
     <select class="field" id="assignee" aria-label="Filter by assignee"></select>
@@ -230,9 +236,11 @@ dialog label { display: grid; gap: 4px; color: var(--text-2); }
   </div>
 </div>
 
+<datalist id="project-names"></datalist>
 <dialog id="create-dialog">
   <form method="dialog" id="create-form">
     <h2>New task</h2>
+    <label>Project <input class="field mono" name="project" required autocomplete="off" list="project-names" pattern="[a-z0-9][a-z0-9\-]{0,39}" title="Lowercase slug: a-z, 0-9 and -, e.g. wow-ui-sim"></label>
     <label>Title <input class="field" name="title" required autocomplete="off"></label>
     <label>Description <textarea class="field" name="description" rows="6"></textarea></label>
     <label>Priority
@@ -260,6 +268,7 @@ const state = {
   tasks: [], ready: new Set(), cursor: 0,
   selected: null, detail: null, cursorId: null,
   filter: "", assignee: "", readyOnly: false,
+  project: new URLSearchParams(location.search).get("project") || "",
   collapsed: new Set(["completed"]),
   drafts: {}, lastSync: null,
 };
@@ -371,9 +380,12 @@ function markSynced() {
 }
 
 // ---- list ----
+function inProject(task) {
+  return !state.project || task.project === state.project;
+}
 function visibleTasks() {
   const needle = state.filter.toLowerCase();
-  return state.tasks.filter((task) =>
+  return state.tasks.filter((task) => inProject(task) &&
     (!needle || task.title.toLowerCase().includes(needle) || task.id.includes(needle) || (task.description || "").toLowerCase().includes(needle)) &&
     (!state.assignee || (state.assignee === "-" ? !task.assignee : task.assignee === state.assignee)) &&
     (!state.readyOnly || state.ready.has(task.id)));
@@ -384,12 +396,32 @@ function groupOf(task) {
   return STATUSES.includes(task.status) ? task.status : "pending";
 }
 function renderCounts() {
-  const count = (status) => state.tasks.filter((task) => groupOf(task) === status).length;
+  const count = (status) => state.tasks.filter((task) => inProject(task) && groupOf(task) === status).length;
+  const ready = state.tasks.filter((task) => inProject(task) && state.ready.has(task.id)).length;
   $("counts").replaceChildren(
     h("span", null, h("b", { class: "num" }, count("in_progress")), " in progress"),
-    h("span", null, h("b", { class: "num" }, state.ready.size), " ready"),
+    h("span", null, h("b", { class: "num" }, ready), " ready"),
     h("span", null, h("b", { class: "num" }, count("scheduled")), " scheduled"),
     h("span", null, h("b", { class: "num" }, count("blocked")), " blocked"));
+}
+function projectNames() {
+  return [...new Set(state.tasks.map((task) => task.project))].sort();
+}
+function renderProjects() {
+  const names = projectNames();
+  const open = (name) => state.tasks.filter((task) => task.project === name && groupOf(task) !== "completed").length;
+  $("project").replaceChildren(h("option", { value: "" }, "All projects"),
+    ...names.map((name) => h("option", { value: name }, `${name} (${open(name)})`)));
+  $("project").value = names.includes(state.project) ? state.project : "";
+  $("project-names").replaceChildren(...names.map((name) => h("option", { value: name })));
+  $("list").classList.toggle("one-project", Boolean(state.project));
+}
+function setProject(name) {
+  state.project = name;
+  const url = new URL(location.href);
+  if (name) url.searchParams.set("project", name); else url.searchParams.delete("project");
+  history.replaceState(null, "", url);
+  render();
 }
 function renderAssignees() {
   const select = $("assignee");
@@ -415,6 +447,7 @@ function taskRow(task) {
     h("span", { class: "prio", dataset: { p: String(Math.min(task.priority, 3)) }, title: `Priority: ${PRIORITY_LABEL[Math.min(task.priority, 3)]}` }, h("i"), h("i"), h("i")),
     h("span", { class: "id" }, task.id),
     h("span", { class: "st " + (groupOf(task) === "scheduled" ? "scheduled" : task.status), title: STATUS_LABEL[groupOf(task) === "scheduled" ? "scheduled" : task.status] || task.status }),
+    h("button", { class: "project linkish", title: `Show only ${task.project}`, onclick: (e) => { e.stopPropagation(); setProject(task.project); } }, task.project),
     h("span", { class: "title" }, task.title),
     h("span", { class: "tags" }, tags.filter(Boolean)),
     h("span", { class: "assignee" }, task.assignee || ""),
@@ -465,11 +498,13 @@ function renderProps(task) {
     onchange: (e) => patch({ assignee: e.target.value.trim() }) });
   const due = h("input", { class: "field mono", type: "datetime-local", value: localInputValue(task.due_at),
     onchange: (e) => patch({ due_at: e.target.value ? new Date(e.target.value).toISOString() : "" }) });
+  const project = h("input", { class: "field mono", value: task.project, list: "project-names", autocomplete: "off", required: true,
+    onchange: (e) => { const value = e.target.value.trim(); if (value && value !== task.project) patch({ project: value }); else e.target.value = task.project; } });
   const branch = h("input", { class: "field mono", value: task.target_branch || "", placeholder: "None", autocomplete: "off",
     onchange: (e) => patch({ target_branch: e.target.value.trim() }) });
   return h("div", { class: "props" },
     propRow("Status", status), propRow("Priority", priority), propRow("Assignee", assignee),
-    propRow("Due", due), propRow("Branch", branch),
+    propRow("Project", project), propRow("Due", due), propRow("Branch", branch),
     h("span", { class: "muted" }, "Created"), h("span", null, timeEl(task.created_at)));
 }
 function renderDescription(task) {
@@ -603,13 +638,13 @@ function renderDetail() {
   panel.scrollTop = scroll;
   if (focusedId) { const again = document.getElementById(focusedId); if (again) again.focus(); }
 }
-function render() { renderCounts(); renderAssignees(); renderList(); renderDetail(); }
+function render() { renderProjects(); renderCounts(); renderAssignees(); renderList(); renderDetail(); }
 
 async function select(id) {
   state.drafts = {};
   state.selected = id;
   state.cursorId = id || state.cursorId;
-  history.replaceState(null, "", id ? `#${id}` : location.pathname);
+  history.replaceState(null, "", `${location.pathname}${location.search}${id ? `#${id}` : ""}`);
   if (!id) { state.detail = null; render(); return; }
   try { await loadDetail(id); }
   catch (error) { toast(`Open ${id}: ${error.message}`, true); state.selected = null; state.detail = null; }
@@ -617,17 +652,24 @@ async function select(id) {
 }
 
 // ---- create ----
-$("new-task").addEventListener("click", () => { $("create-form").reset(); $("create-dialog").showModal(); });
+$("new-task").addEventListener("click", () => {
+  const form = $("create-form");
+  form.reset();
+  form.project.value = state.project;
+  $("create-dialog").showModal();
+  (state.project ? form.title : form.project).focus();
+});
 $("create-form").addEventListener("submit", (e) => {
   if (e.submitter && e.submitter.value !== "create") return;
   const data = new FormData(e.target);
-  const body = { title: data.get("title").trim(), description: data.get("description").trim() || undefined, priority: Number(data.get("priority")) };
+  const body = { project: data.get("project").trim(), title: data.get("title").trim(), description: data.get("description").trim() || undefined, priority: Number(data.get("priority")) };
   api("POST", "/tasks", body).then(async (task) => { await refresh(); await select(task.id); toast(`Created ${task.id}`); })
     .catch((error) => toast(`Create: ${error.message}`, true));
 });
 
 // ---- filters + keyboard ----
 $("search").addEventListener("input", (e) => { state.filter = e.target.value; renderList(); });
+$("project").addEventListener("change", (e) => setProject(e.target.value));
 $("assignee").addEventListener("change", (e) => { state.assignee = e.target.value; renderList(); });
 $("toggle-ready").addEventListener("click", (e) => {
   state.readyOnly = !state.readyOnly;

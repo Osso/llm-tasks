@@ -17,6 +17,8 @@ is set; every command behaves the same as in local mode.
 - [x] A claim is one conditional `UPDATE` in an immediate transaction; events are recorded only for the winning claim.
 - [x] Reminders are tasks with a due time. `due_at` and `delivered_at` are RFC 3339 UTC (`...Z`) or null. Input due times need an explicit offset and are normalized to UTC; any other value returns 400. Changing `due_at`, or setting status back to `pending`, clears `delivered_at`.
 - [x] `GET /tasks/due` returns tasks whose status is not `completed`/`done`, whose `due_at` is at or before the server's current time, and whose `delivered_at` is null, ordered by `due_at`. `POST /tasks/{id}/delivered` with `{"due_at"}` sets `delivered_at` only when that due time is still current, undelivered and open (one conditional `UPDATE`); otherwise 409. It records a `delivered` event. The Pi Supervisor polls this route and delivers each due task into its conversation.
+- [x] Every task belongs to a project: a lowercase slug matching `^[a-z0-9][a-z0-9-]{0,39}$` (e.g. `wow-ui-sim`), stored in `tasks.project TEXT NOT NULL`. Projects need no registration. `POST /tasks` without `project` or with an invalid one returns 400; `PATCH` may move a task to another valid project (recorded as an `updated` event on field `project`). `GET /tasks?project=` filters. CLI: `lt create --project <slug>` (default `LT_PROJECT`; required), `lt list --project`, `lt update --project`; list and show output include the project. The dashboard shows a project column, a project selector kept in `?project=`, and a required project in the create dialog.
+- [x] Migration of a database from before projects: opening adds a nullable `project` column and fails, naming the number of tasks without a project, until the operator sets one on every task. The next open rebuilds `tasks` with `project NOT NULL` (SQLite's table-rebuild procedure: foreign keys off, `foreign_key_check` before commit), keeping every row, dependency and event.
 - [x] CLI: `lt create --due <time>`, `lt update <id> --due <time>` (`""` clears it), `lt due`.
 - [x] `GET /tasks/ready` (and `lt ready`) lists open, unassigned tasks with no open blocker, no unanswered question set, and no due time in the future.
 - [x] Attachments: `POST /tasks/{id}/attachments?name=<name>` stores the raw request body (Content-Type kept as the MIME type, default `application/octet-stream`) in tasks.db, so the database backup covers it. A file is at most 10 MiB (413 above that); the name must be non-empty and contain no `/` (400). It records an `attached` event (`new_value` = `<id> <name>`). `GET /attachments/{id}` returns the bytes with `Content-Type`, `Content-Disposition` (RFC 6266: ASCII `filename` with `_` for other characters, exact UTF-8 name in `filename*`) and the metadata as ASCII JSON in `X-LT-Attachment`. CLI: `lt attach <task> <file> [--name] [--mime]`, `lt attachments <task>`, `lt attachment <id> [-o file]`.
@@ -32,11 +34,11 @@ All bodies are JSON. Errors are `{"error": "<message>"}`.
 | GET | `/healthz` | — | 200 `"ok"` (no auth) | — |
 | GET | `/events?after=` | — | 200 `[Event]` | — (`Database::events_after`) |
 | GET | `/rules` | — | 200 markdown text (404 when unconfigured) | — |
-| POST | `/tasks` | `{"title", "description"?, "priority"?}` | 201 `Task` | `create_task` |
-| GET | `/tasks?status=&assignee=` | — | 200 `[Task]` | `list_tasks` |
+| POST | `/tasks` | `{"project", "title", "description"?, "priority"?}` | 201 `Task` | `create_task` |
+| GET | `/tasks?status=&assignee=&project=` | — | 200 `[Task]` | `list_tasks` |
 | GET | `/tasks/ready` | — | 200 `[Task]` | `ready_tasks` |
 | GET | `/tasks/{id}` | — | 200 `Task` | `get_task` |
-| PATCH | `/tasks/{id}` | `{"status"?, "priority"?, "title"?, "description"?, "assignee"?, "target_branch"?, "due_at"?}` | 204 | `update_task` |
+| PATCH | `/tasks/{id}` | `{"status"?, "priority"?, "title"?, "description"?, "assignee"?, "target_branch"?, "due_at"?, "project"?}` | 204 | `update_task` |
 | GET | `/tasks/due` | — | 200 `[Task]` | `due_tasks` |
 | POST | `/tasks/{id}/attachments?name=` | raw bytes | 201 `Attachment` | `add_attachment` |
 | GET | `/tasks/{id}/attachments` | — | 200 `[Attachment]` | `list_attachments` |
@@ -62,7 +64,7 @@ All bodies are JSON. Errors are `{"error": "<message>"}`.
 |---|---|
 | `db::NotFound` | 404 |
 | `db::Conflict` | 409 |
-| `db::Invalid` (bad due time, question set, answers, attachment name or size) | 400 |
+| `db::Invalid` (missing or invalid project, bad due time, question set, answers, attachment name or size) | 400 |
 | request body over 10 MiB | 413 |
 | malformed JSON / missing field | 400 (axum default rejection is fine) |
 | anything else | 500 |
@@ -70,7 +72,8 @@ All bodies are JSON. Errors are `{"error": "<message>"}`.
 ## Tests asserting this spec
 
 - `tests/db_test.rs`: atomic claim (concurrent claimers, one winner, one event pair); due listing, due-time validation, delivery reset on reschedule/reopen, stale or repeated delivery conflicts; future reminders not ready; question validation, ready blocking until answered, single answer; attachment round trip, size cap.
-- `tests/server_test.rs`: the dashboard listener (page, tokenless writes visible through the token API with actor `web`, main listener 401 without token and 404 for `/`); auth, routes, error mapping, concurrent HTTP claims, `/rules` auth, live file edits and 404 when unconfigured, `/events` cursor feed, `/tasks/due` and delivery acknowledgement; `HttpStore` attachments (non-ASCII name, 413) and questions (400, 409, ready blocking) against the real router.
+- `tests/db_test.rs` (projects): validation, `?project` filter, moving a task with its event; legacy database with tasks refuses to open until backfilled, then rebuilds NOT NULL keeping tasks, due times and dependencies.
+- `tests/server_test.rs`: missing/invalid project returns 400, `?project=` filter; the dashboard listener (page, tokenless writes visible through the token API with actor `web`, main listener 401 without token and 404 for `/`); auth, routes, error mapping, concurrent HTTP claims, `/rules` auth, live file edits and 404 when unconfigured, `/events` cursor feed, `/tasks/due` and delivery acknowledgement; `HttpStore` attachments (non-ASCII name, 413) and questions (400, 409, ready blocking) against the real router.
 
 ## Watcher
 

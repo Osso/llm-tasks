@@ -22,7 +22,7 @@ async fn open_creates_parent_directories() {
 async fn create_task_returns_pending() {
     let (db, _dir) = temp_db().await;
     let task = db
-        .create_task("Build feature", Some("Details"), 2, "agent-1")
+        .create_task("test", "Build feature", Some("Details"), 2, "agent-1")
         .await
         .unwrap();
 
@@ -37,7 +37,10 @@ async fn create_task_returns_pending() {
 #[tokio::test]
 async fn create_task_without_description() {
     let (db, _dir) = temp_db().await;
-    let task = db.create_task("No desc", None, 0, "agent-1").await.unwrap();
+    let task = db
+        .create_task("test", "No desc", None, 0, "agent-1")
+        .await
+        .unwrap();
 
     assert_eq!(task.title, "No desc");
     assert!(task.description.is_none() || task.description.as_deref() == Some(""));
@@ -54,11 +57,11 @@ async fn get_task_not_found() {
 #[tokio::test]
 async fn list_tasks_ordered_by_priority() {
     let (db, _dir) = temp_db().await;
-    db.create_task("Low", None, 1, "a").await.unwrap();
-    db.create_task("High", None, 3, "a").await.unwrap();
-    db.create_task("Med", None, 2, "a").await.unwrap();
+    db.create_task("test", "Low", None, 1, "a").await.unwrap();
+    db.create_task("test", "High", None, 3, "a").await.unwrap();
+    db.create_task("test", "Med", None, 2, "a").await.unwrap();
 
-    let tasks = db.list_tasks(None, None).await.unwrap();
+    let tasks = db.list_tasks(None, None, None).await.unwrap();
     assert_eq!(tasks.len(), 3);
     assert_eq!(tasks[0].priority, 3);
     assert_eq!(tasks[1].priority, 2);
@@ -68,11 +71,13 @@ async fn list_tasks_ordered_by_priority() {
 #[tokio::test]
 async fn list_tasks_filter_by_status() {
     let (db, _dir) = temp_db().await;
-    let t1 = db.create_task("Done", None, 0, "a").await.unwrap();
-    db.create_task("Pending", None, 0, "a").await.unwrap();
+    let t1 = db.create_task("test", "Done", None, 0, "a").await.unwrap();
+    db.create_task("test", "Pending", None, 0, "a")
+        .await
+        .unwrap();
     db.close_task(&t1.id, "a").await.unwrap();
 
-    let completed = db.list_tasks(Some("completed"), None).await.unwrap();
+    let completed = db.list_tasks(Some("completed"), None, None).await.unwrap();
     assert_eq!(completed.len(), 1);
     assert_eq!(completed[0].id, t1.id);
 }
@@ -80,11 +85,16 @@ async fn list_tasks_filter_by_status() {
 #[tokio::test]
 async fn list_tasks_filter_by_assignee() {
     let (db, _dir) = temp_db().await;
-    let t1 = db.create_task("Claimed", None, 0, "a").await.unwrap();
-    db.create_task("Unclaimed", None, 0, "a").await.unwrap();
+    let t1 = db
+        .create_task("test", "Claimed", None, 0, "a")
+        .await
+        .unwrap();
+    db.create_task("test", "Unclaimed", None, 0, "a")
+        .await
+        .unwrap();
     db.claim_task(&t1.id, "dev-0").await.unwrap();
 
-    let assigned = db.list_tasks(None, Some("dev-0")).await.unwrap();
+    let assigned = db.list_tasks(None, Some("dev-0"), None).await.unwrap();
     assert_eq!(assigned.len(), 1);
     assert_eq!(assigned[0].id, t1.id);
 }
@@ -92,12 +102,18 @@ async fn list_tasks_filter_by_assignee() {
 #[tokio::test]
 async fn list_tasks_filters_by_status_and_assignee() {
     let (db, _dir) = temp_db().await;
-    let matching = db.create_task("Matching", None, 0, "a").await.unwrap();
-    let wrong_assignee = db
-        .create_task("Wrong assignee", None, 0, "a")
+    let matching = db
+        .create_task("test", "Matching", None, 0, "a")
         .await
         .unwrap();
-    let wrong_status = db.create_task("Wrong status", None, 0, "a").await.unwrap();
+    let wrong_assignee = db
+        .create_task("test", "Wrong assignee", None, 0, "a")
+        .await
+        .unwrap();
+    let wrong_status = db
+        .create_task("test", "Wrong status", None, 0, "a")
+        .await
+        .unwrap();
 
     db.claim_task(&matching.id, "dev-0").await.unwrap();
     db.claim_task(&wrong_assignee.id, "dev-1").await.unwrap();
@@ -105,7 +121,7 @@ async fn list_tasks_filters_by_status_and_assignee() {
     db.close_task(&wrong_status.id, "dev-0").await.unwrap();
 
     let tasks = db
-        .list_tasks(Some("in_progress"), Some("dev-0"))
+        .list_tasks(Some("in_progress"), Some("dev-0"), None)
         .await
         .unwrap();
 
@@ -116,7 +132,10 @@ async fn list_tasks_filters_by_status_and_assignee() {
 #[tokio::test]
 async fn claim_sets_assignee_and_in_progress() {
     let (db, _dir) = temp_db().await;
-    let task = db.create_task("Claimable", None, 0, "a").await.unwrap();
+    let task = db
+        .create_task("test", "Claimable", None, 0, "a")
+        .await
+        .unwrap();
 
     db.claim_task(&task.id, "dev-0").await.unwrap();
 
@@ -128,7 +147,7 @@ async fn claim_sets_assignee_and_in_progress() {
 #[tokio::test]
 async fn claim_rejects_already_claimed() {
     let (db, _dir) = temp_db().await;
-    let task = db.create_task("Race", None, 0, "a").await.unwrap();
+    let task = db.create_task("test", "Race", None, 0, "a").await.unwrap();
 
     db.claim_task(&task.id, "dev-0").await.unwrap();
     let result = db.claim_task(&task.id, "dev-1").await;
@@ -140,7 +159,7 @@ async fn claim_rejects_already_claimed() {
 #[tokio::test]
 async fn claim_rejects_ready_task_with_assignee() {
     let (db, _dir) = temp_db().await;
-    let task = db.create_task("Race", None, 0, "a").await.unwrap();
+    let task = db.create_task("test", "Race", None, 0, "a").await.unwrap();
     db.claim_task(&task.id, "dev-0").await.unwrap();
     db.update_task(
         &task.id,
@@ -165,7 +184,7 @@ async fn claim_rejects_ready_task_with_assignee() {
 #[tokio::test]
 async fn claim_rejects_completed() {
     let (db, _dir) = temp_db().await;
-    let task = db.create_task("Done", None, 0, "a").await.unwrap();
+    let task = db.create_task("test", "Done", None, 0, "a").await.unwrap();
     db.close_task(&task.id, "a").await.unwrap();
 
     let result = db.claim_task(&task.id, "dev-0").await;
@@ -175,7 +194,10 @@ async fn claim_rejects_completed() {
 #[tokio::test]
 async fn close_sets_completed() {
     let (db, _dir) = temp_db().await;
-    let task = db.create_task("Closeable", None, 0, "a").await.unwrap();
+    let task = db
+        .create_task("test", "Closeable", None, 0, "a")
+        .await
+        .unwrap();
 
     db.close_task(&task.id, "a").await.unwrap();
 
@@ -186,7 +208,10 @@ async fn close_sets_completed() {
 #[tokio::test]
 async fn update_changes_fields() {
     let (db, _dir) = temp_db().await;
-    let task = db.create_task("Original", None, 1, "a").await.unwrap();
+    let task = db
+        .create_task("test", "Original", None, 1, "a")
+        .await
+        .unwrap();
 
     db.update_task(
         &task.id,
@@ -211,7 +236,7 @@ async fn update_changes_fields() {
 async fn update_empty_optional_fields_clears_to_null() {
     let (db, _dir) = temp_db().await;
     let task = db
-        .create_task_with_branch("Original", Some("desc"), 1, "a", Some("feature"))
+        .create_task_with_branch("test", "Original", Some("desc"), 1, "a", Some("feature"))
         .await
         .unwrap();
 
@@ -237,7 +262,7 @@ async fn update_empty_optional_fields_clears_to_null() {
 #[tokio::test]
 async fn update_skips_unchanged_fields() {
     let (db, _dir) = temp_db().await;
-    let task = db.create_task("Same", None, 1, "a").await.unwrap();
+    let task = db.create_task("test", "Same", None, 1, "a").await.unwrap();
 
     db.update_task(
         &task.id,
@@ -260,9 +285,15 @@ async fn update_skips_unchanged_fields() {
 #[tokio::test]
 async fn ready_returns_unblocked_only() {
     let (db, _dir) = temp_db().await;
-    let blocker = db.create_task("Blocker", None, 3, "a").await.unwrap();
-    let blocked = db.create_task("Blocked", None, 2, "a").await.unwrap();
-    let free = db.create_task("Free", None, 1, "a").await.unwrap();
+    let blocker = db
+        .create_task("test", "Blocker", None, 3, "a")
+        .await
+        .unwrap();
+    let blocked = db
+        .create_task("test", "Blocked", None, 2, "a")
+        .await
+        .unwrap();
+    let free = db.create_task("test", "Free", None, 1, "a").await.unwrap();
 
     db.add_dependency(&blocked.id, &blocker.id, "blocks")
         .await
@@ -279,8 +310,14 @@ async fn ready_returns_unblocked_only() {
 #[tokio::test]
 async fn completing_blocker_unblocks_dependent() {
     let (db, _dir) = temp_db().await;
-    let blocker = db.create_task("Blocker", None, 0, "a").await.unwrap();
-    let blocked = db.create_task("Blocked", None, 0, "a").await.unwrap();
+    let blocker = db
+        .create_task("test", "Blocker", None, 0, "a")
+        .await
+        .unwrap();
+    let blocked = db
+        .create_task("test", "Blocked", None, 0, "a")
+        .await
+        .unwrap();
 
     db.add_dependency(&blocked.id, &blocker.id, "blocks")
         .await
@@ -306,9 +343,9 @@ async fn completing_blocker_unblocks_dependent() {
 #[tokio::test]
 async fn chain_dependency_unblock() {
     let (db, _dir) = temp_db().await;
-    let a = db.create_task("A", None, 0, "x").await.unwrap();
-    let b = db.create_task("B", None, 0, "x").await.unwrap();
-    let c = db.create_task("C", None, 0, "x").await.unwrap();
+    let a = db.create_task("test", "A", None, 0, "x").await.unwrap();
+    let b = db.create_task("test", "B", None, 0, "x").await.unwrap();
+    let c = db.create_task("test", "C", None, 0, "x").await.unwrap();
 
     db.add_dependency(&b.id, &a.id, "blocks").await.unwrap();
     db.add_dependency(&c.id, &b.id, "blocks").await.unwrap();
@@ -334,7 +371,7 @@ async fn chain_dependency_unblock() {
 #[tokio::test]
 async fn add_dependency_validates_tasks_exist() {
     let (db, _dir) = temp_db().await;
-    let task = db.create_task("Real", None, 0, "a").await.unwrap();
+    let task = db.create_task("test", "Real", None, 0, "a").await.unwrap();
 
     assert!(
         db.add_dependency(&task.id, "lt-fake", "blocks")
@@ -351,8 +388,8 @@ async fn add_dependency_validates_tasks_exist() {
 #[tokio::test]
 async fn remove_dependency_unblocks() {
     let (db, _dir) = temp_db().await;
-    let a = db.create_task("A", None, 0, "x").await.unwrap();
-    let b = db.create_task("B", None, 0, "x").await.unwrap();
+    let a = db.create_task("test", "A", None, 0, "x").await.unwrap();
+    let b = db.create_task("test", "B", None, 0, "x").await.unwrap();
 
     db.add_dependency(&b.id, &a.id, "blocks").await.unwrap();
     assert!(!db.ready_tasks().await.unwrap().iter().any(|t| t.id == b.id));
@@ -364,8 +401,8 @@ async fn remove_dependency_unblocks() {
 #[tokio::test]
 async fn get_dependencies_returns_deps() {
     let (db, _dir) = temp_db().await;
-    let a = db.create_task("A", None, 0, "x").await.unwrap();
-    let b = db.create_task("B", None, 0, "x").await.unwrap();
+    let a = db.create_task("test", "A", None, 0, "x").await.unwrap();
+    let b = db.create_task("test", "B", None, 0, "x").await.unwrap();
 
     db.add_dependency(&b.id, &a.id, "blocks").await.unwrap();
 
@@ -378,8 +415,8 @@ async fn get_dependencies_returns_deps() {
 #[tokio::test]
 async fn get_reverse_dependencies_returns_dependents() {
     let (db, _dir) = temp_db().await;
-    let blocker = db.create_task("A", None, 0, "x").await.unwrap();
-    let dependent = db.create_task("B", None, 0, "x").await.unwrap();
+    let blocker = db.create_task("test", "A", None, 0, "x").await.unwrap();
+    let dependent = db.create_task("test", "B", None, 0, "x").await.unwrap();
 
     db.add_dependency(&dependent.id, &blocker.id, "blocks")
         .await
@@ -394,8 +431,8 @@ async fn get_reverse_dependencies_returns_dependents() {
 #[tokio::test]
 async fn delete_task_removes_related_rows() {
     let (db, _dir) = temp_db().await;
-    let blocker = db.create_task("A", None, 0, "x").await.unwrap();
-    let dependent = db.create_task("B", None, 0, "x").await.unwrap();
+    let blocker = db.create_task("test", "A", None, 0, "x").await.unwrap();
+    let dependent = db.create_task("test", "B", None, 0, "x").await.unwrap();
 
     db.add_dependency(&dependent.id, &blocker.id, "blocks")
         .await
@@ -417,7 +454,10 @@ async fn delete_task_removes_related_rows() {
 #[tokio::test]
 async fn events_track_full_lifecycle() {
     let (db, _dir) = temp_db().await;
-    let task = db.create_task("Tracked", None, 1, "creator").await.unwrap();
+    let task = db
+        .create_task("test", "Tracked", None, 1, "creator")
+        .await
+        .unwrap();
 
     db.claim_task(&task.id, "worker").await.unwrap();
     db.close_task(&task.id, "worker").await.unwrap();
@@ -433,7 +473,10 @@ async fn events_track_full_lifecycle() {
 #[tokio::test]
 async fn events_track_field_updates() {
     let (db, _dir) = temp_db().await;
-    let task = db.create_task("Before", None, 1, "a").await.unwrap();
+    let task = db
+        .create_task("test", "Before", None, 1, "a")
+        .await
+        .unwrap();
 
     db.update_task(
         &task.id,
@@ -468,7 +511,10 @@ async fn events_track_field_updates() {
 #[tokio::test]
 async fn add_and_get_comments() {
     let (db, _dir) = temp_db().await;
-    let task = db.create_task("Commentable", None, 0, "a").await.unwrap();
+    let task = db
+        .create_task("test", "Commentable", None, 0, "a")
+        .await
+        .unwrap();
 
     let c1 = db
         .add_comment(&task.id, "dev-0", "Blocked: need API key")
@@ -492,7 +538,10 @@ async fn add_and_get_comments() {
 #[tokio::test]
 async fn comments_empty_for_no_comments() {
     let (db, _dir) = temp_db().await;
-    let task = db.create_task("Silent", None, 0, "a").await.unwrap();
+    let task = db
+        .create_task("test", "Silent", None, 0, "a")
+        .await
+        .unwrap();
 
     let comments = db.get_comments(&task.id).await.unwrap();
     assert!(comments.is_empty());
@@ -501,7 +550,10 @@ async fn comments_empty_for_no_comments() {
 #[tokio::test]
 async fn clear_assignee_sets_null() {
     let (db, _dir) = temp_db().await;
-    let task = db.create_task("Assigned", None, 0, "a").await.unwrap();
+    let task = db
+        .create_task("test", "Assigned", None, 0, "a")
+        .await
+        .unwrap();
     db.claim_task(&task.id, "dev-0").await.unwrap();
 
     assert_eq!(
@@ -517,7 +569,7 @@ async fn clear_assignee_sets_null() {
 #[tokio::test]
 async fn clear_assignee_makes_task_ready_dispatchable() {
     let (db, _dir) = temp_db().await;
-    let task = db.create_task("Stuck", None, 0, "a").await.unwrap();
+    let task = db.create_task("test", "Stuck", None, 0, "a").await.unwrap();
     db.claim_task(&task.id, "dev-0").await.unwrap();
 
     // Set back to ready but assignee still set
@@ -572,7 +624,7 @@ async fn open_migrates_database_without_target_branch() {
 
     let db = Database::open(&path).await.unwrap();
     let task = db
-        .create_task_with_branch("Migrated", None, 0, "agent", Some("branch"))
+        .create_task_with_branch("test", "Migrated", None, 0, "agent", Some("branch"))
         .await
         .unwrap();
 
@@ -586,7 +638,10 @@ async fn concurrent_claims_across_connections_have_one_winner() {
     let path = dir.path().join("shared.db");
     let first = std::sync::Arc::new(Database::open(&path).await.unwrap());
     let second = std::sync::Arc::new(Database::open(&path).await.unwrap());
-    let task = first.create_task("Contested", None, 0, "a").await.unwrap();
+    let task = first
+        .create_task("test", "Contested", None, 0, "a")
+        .await
+        .unwrap();
 
     let mut claims = Vec::new();
     for n in 0..16 {
@@ -637,14 +692,23 @@ async fn set_due(db: &Database, id: &str, due_at: &str) {
 #[tokio::test]
 async fn due_tasks_lists_only_open_undelivered_tasks_past_their_due_time() {
     let (db, _dir) = temp_db().await;
-    let due = db.create_task("Due", None, 0, "agent-1").await.unwrap();
-    let future = db.create_task("Future", None, 0, "agent-1").await.unwrap();
-    let closed = db.create_task("Closed", None, 0, "agent-1").await.unwrap();
-    let delivered = db
-        .create_task("Delivered", None, 0, "agent-1")
+    let due = db
+        .create_task("test", "Due", None, 0, "agent-1")
         .await
         .unwrap();
-    db.create_task("No due time", None, 0, "agent-1")
+    let future = db
+        .create_task("test", "Future", None, 0, "agent-1")
+        .await
+        .unwrap();
+    let closed = db
+        .create_task("test", "Closed", None, 0, "agent-1")
+        .await
+        .unwrap();
+    let delivered = db
+        .create_task("test", "Delivered", None, 0, "agent-1")
+        .await
+        .unwrap();
+    db.create_task("test", "No due time", None, 0, "agent-1")
         .await
         .unwrap();
     set_due(&db, &due.id, "2026-11-15T09:00:00-06:00").await;
@@ -667,7 +731,7 @@ async fn due_tasks_lists_only_open_undelivered_tasks_past_their_due_time() {
 async fn invalid_due_time_is_rejected_without_change() {
     let (db, _dir) = temp_db().await;
     let task = db
-        .create_task("Reminder", None, 0, "agent-1")
+        .create_task("test", "Reminder", None, 0, "agent-1")
         .await
         .unwrap();
     let updates = TaskUpdates {
@@ -688,7 +752,7 @@ async fn invalid_due_time_is_rejected_without_change() {
 async fn rescheduling_or_reopening_clears_delivery() {
     let (db, _dir) = temp_db().await;
     let task = db
-        .create_task("Reminder", None, 0, "agent-1")
+        .create_task("test", "Reminder", None, 0, "agent-1")
         .await
         .unwrap();
     set_due(&db, &task.id, "2026-11-15T09:00:00Z").await;
@@ -718,7 +782,7 @@ async fn rescheduling_or_reopening_clears_delivery() {
 async fn mark_delivered_rejects_stale_due_time_and_double_delivery() {
     let (db, _dir) = temp_db().await;
     let task = db
-        .create_task("Reminder", None, 0, "agent-1")
+        .create_task("test", "Reminder", None, 0, "agent-1")
         .await
         .unwrap();
     set_due(&db, &task.id, "2026-11-15T09:00:00Z").await;
@@ -775,7 +839,7 @@ fn answers(pairs: &[(&str, &str)]) -> llm_tasks::questions::Answers {
 async fn unanswered_questions_keep_a_task_out_of_ready_until_answered() {
     let (db, _dir) = temp_db().await;
     let task = db
-        .create_task("Migrate DB", None, 1, "agent-1")
+        .create_task("test", "Migrate DB", None, 1, "agent-1")
         .await
         .unwrap();
     let asked = db
@@ -834,7 +898,10 @@ async fn unanswered_questions_keep_a_task_out_of_ready_until_answered() {
 #[tokio::test]
 async fn malformed_question_sets_are_rejected() {
     let (db, _dir) = temp_db().await;
-    let task = db.create_task("Task", None, 0, "agent-1").await.unwrap();
+    let task = db
+        .create_task("test", "Task", None, 0, "agent-1")
+        .await
+        .unwrap();
     let cases = vec![
         vec![],
         vec![question("One option?", &["Only"])],
@@ -858,8 +925,14 @@ async fn malformed_question_sets_are_rejected() {
 #[tokio::test]
 async fn reminders_are_not_ready_before_their_due_time() {
     let (db, _dir) = temp_db().await;
-    let future = db.create_task("Later", None, 0, "agent-1").await.unwrap();
-    let past = db.create_task("Overdue", None, 0, "agent-1").await.unwrap();
+    let future = db
+        .create_task("test", "Later", None, 0, "agent-1")
+        .await
+        .unwrap();
+    let past = db
+        .create_task("test", "Overdue", None, 0, "agent-1")
+        .await
+        .unwrap();
     set_due(&db, &future.id, "2099-01-01T00:00:00Z").await;
     set_due(&db, &past.id, "2020-01-01T00:00:00Z").await;
 
@@ -878,7 +951,10 @@ async fn reminders_are_not_ready_before_their_due_time() {
 async fn attachments_round_trip_and_respect_the_size_cap() {
     use llm_tasks::attachments::{MAX_ATTACHMENT_BYTES, NewAttachment};
     let (db, _dir) = temp_db().await;
-    let task = db.create_task("Logs", None, 0, "agent-1").await.unwrap();
+    let task = db
+        .create_task("test", "Logs", None, 0, "agent-1")
+        .await
+        .unwrap();
     let data = b"line 1\nline 2\n";
     let file = NewAttachment {
         name: "build.log",
@@ -907,4 +983,121 @@ async fn attachments_round_trip_and_respect_the_size_cap() {
     let missing = db.get_attachment(9999).await.unwrap_err();
     assert!(missing.downcast_ref::<NotFound>().is_some());
     assert_eq!(db.list_attachments(&task.id).await.unwrap().len(), 1);
+}
+
+/// A database from before projects, holding tasks, comments and a dependency.
+fn legacy_db_with_tasks(path: &std::path::Path) {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    conn.execute_batch(
+        "
+        CREATE TABLE tasks (
+            id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT,
+            status TEXT NOT NULL DEFAULT 'pending', priority INTEGER NOT NULL DEFAULT 0,
+            assignee TEXT, target_branch TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            due_at TEXT, delivered_at TEXT
+        );
+        CREATE TABLE dependencies (
+            task_id TEXT NOT NULL REFERENCES tasks(id), depends_on TEXT NOT NULL REFERENCES tasks(id),
+            dep_type TEXT NOT NULL DEFAULT 'blocks', PRIMARY KEY (task_id, depends_on)
+        );
+        INSERT INTO tasks (id, title, status, priority, created_at, updated_at, due_at)
+            VALUES ('lt-0001', 'Old work', 'pending', 2, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', NULL),
+                   ('lt-0002', 'Old reminder', 'pending', 0, '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z', '2026-12-01T09:00:00Z');
+        INSERT INTO dependencies (task_id, depends_on) VALUES ('lt-0002', 'lt-0001');
+        ",
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn legacy_tasks_block_open_until_every_task_has_a_project() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("legacy.db");
+    legacy_db_with_tasks(&path);
+
+    let error = Database::open(&path).await.err().unwrap().to_string();
+    assert!(error.contains("2 tasks have no project"), "{error}");
+
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch(
+            "UPDATE tasks SET project = 'wow-ui-sim' WHERE id = 'lt-0001';
+             UPDATE tasks SET project = 'personal' WHERE id = 'lt-0002';",
+        )
+        .unwrap();
+    let db = Database::open(&path).await.unwrap();
+
+    let old = db.get_task("lt-0001").await.unwrap();
+    assert_eq!((old.project.as_str(), old.priority), ("wow-ui-sim", 2));
+    let reminder = db.get_task("lt-0002").await.unwrap();
+    assert_eq!(reminder.project, "personal");
+    assert_eq!(reminder.due_at.as_deref(), Some("2026-12-01T09:00:00Z"));
+    assert_eq!(
+        db.get_dependencies("lt-0002").await.unwrap()[0].depends_on,
+        "lt-0001"
+    );
+    drop(db);
+    let null_insert = rusqlite::Connection::open(&path).unwrap().execute(
+        "INSERT INTO tasks (id, title, created_at, updated_at) VALUES ('lt-0003', 'x', 'a', 'a')",
+        [],
+    );
+    assert!(null_insert.unwrap_err().to_string().contains("NOT NULL"));
+}
+
+#[tokio::test]
+async fn projects_are_validated_filtered_and_movable() {
+    let (db, _dir) = temp_db().await;
+    for bad in ["", "WoW", "wow ui", "-lead", &"x".repeat(41)] {
+        let error = db.create_task(bad, "Nope", None, 0, "a").await.unwrap_err();
+        assert!(
+            error.downcast_ref::<llm_tasks::db::Invalid>().is_some(),
+            "{bad:?}"
+        );
+    }
+    let sim = db
+        .create_task("wow-ui-sim", "Tooltip", None, 0, "a")
+        .await
+        .unwrap();
+    db.create_task("world-of-osso", "AV window", None, 0, "a")
+        .await
+        .unwrap();
+
+    let only_sim = db.list_tasks(None, None, Some("wow-ui-sim")).await.unwrap();
+    assert_eq!(
+        only_sim.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+        [sim.id.as_str()]
+    );
+
+    let invalid = TaskUpdates {
+        project: Some("Bad Name"),
+        ..Default::default()
+    };
+    assert!(db.update_task(&sim.id, invalid, "a").await.is_err());
+    let moved = TaskUpdates {
+        project: Some("world-of-osso"),
+        ..Default::default()
+    };
+    db.update_task(&sim.id, moved, "mover").await.unwrap();
+    assert_eq!(
+        db.list_tasks(None, None, Some("world-of-osso"))
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    let event = db.get_events(&sim.id).await.unwrap().pop().unwrap();
+    assert_eq!(
+        (
+            event.actor.as_str(),
+            event.field.as_deref(),
+            event.old_value.as_deref(),
+            event.new_value.as_deref()
+        ),
+        (
+            "mover",
+            Some("project"),
+            Some("wow-ui-sim"),
+            Some("world-of-osso")
+        )
+    );
 }

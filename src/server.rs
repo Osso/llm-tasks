@@ -250,6 +250,8 @@ async fn rules(State(state): State<AppState>) -> Response {
 
 #[derive(Deserialize)]
 struct CreateTask {
+    /// Optional in the type only, so a missing project is a 400 with a clear message.
+    project: Option<String>,
     title: String,
     description: Option<String>,
     priority: Option<u8>,
@@ -260,9 +262,13 @@ async fn create_task(
     headers: HeaderMap,
     Json(body): Json<CreateTask>,
 ) -> Response {
+    let Some(project) = body.project else {
+        return error_response(Invalid("project is required".to_owned()).into());
+    };
     let created = state
         .db
         .create_task(
+            &project,
             &body.title,
             body.description.as_deref(),
             body.priority.unwrap_or(0),
@@ -276,13 +282,18 @@ async fn create_task(
 struct TaskFilters {
     status: Option<String>,
     assignee: Option<String>,
+    project: Option<String>,
 }
 
 async fn list_tasks(State(state): State<AppState>, Query(filters): Query<TaskFilters>) -> Response {
     result_response(
         state
             .db
-            .list_tasks(filters.status.as_deref(), filters.assignee.as_deref())
+            .list_tasks(
+                filters.status.as_deref(),
+                filters.assignee.as_deref(),
+                filters.project.as_deref(),
+            )
             .await,
         StatusCode::OK,
     )
@@ -328,6 +339,7 @@ struct UpdateBody {
     assignee: Option<String>,
     target_branch: Option<String>,
     due_at: Option<String>,
+    project: Option<String>,
 }
 
 async fn update_task(
@@ -349,6 +361,7 @@ async fn update_task(
                     assignee: body.assignee.as_deref(),
                     target_branch: body.target_branch.as_deref(),
                     due_at: body.due_at.as_deref(),
+                    project: body.project.as_deref(),
                 },
                 actor(&headers),
             )

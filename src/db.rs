@@ -45,10 +45,28 @@ impl std::error::Error for Conflict {}
 impl std::error::Error for Invalid {}
 
 /// Columns read by `row_to_task`, in order.
-const TASK_COLUMNS: &str = "id, title, description, status, priority, assignee, target_branch, created_at, updated_at, due_at, delivered_at";
+const TASK_COLUMNS: &str = "id, title, description, status, priority, assignee, target_branch, created_at, updated_at, due_at, delivered_at, project";
 
 /// Statuses that end a task; closed tasks are never due.
 const CLOSED_STATUSES: &str = "('completed', 'done')";
+
+/// A project name: lowercase slug, 1-40 characters, e.g. `wow-ui-sim`.
+pub fn validate_project(value: &str) -> Result<()> {
+    let mut chars = value.chars();
+    let valid = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && value.len() <= 40;
+    if valid {
+        Ok(())
+    } else {
+        Err(Invalid(format!(
+            "Invalid project {value:?}: use a lowercase slug (a-z, 0-9, -), at most 40 characters, e.g. wow-ui-sim"
+        ))
+        .into())
+    }
+}
 
 /// Normalize a due time with an explicit offset to RFC 3339 UTC (`...Z`, seconds).
 pub fn normalize_due_at(value: &str) -> Result<String> {
@@ -79,6 +97,8 @@ pub struct Task {
     /// When the current due time was delivered; cleared by rescheduling or reopening.
     #[serde(default)]
     pub delivered_at: Option<String>,
+    /// Project slug; required on every task.
+    pub project: String,
 }
 
 #[derive(Debug, Default)]
@@ -90,6 +110,7 @@ pub struct TaskUpdates<'a> {
     pub assignee: Option<&'a str>,
     pub target_branch: Option<&'a str>,
     pub due_at: Option<&'a str>,
+    pub project: Option<&'a str>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -141,25 +162,29 @@ impl Database {
 
     pub async fn create_task(
         &self,
+        project: &str,
         title: &str,
         desc: Option<&str>,
         priority: u8,
         actor: &str,
     ) -> Result<Task> {
-        self.create_task_with_branch(title, desc, priority, actor, None)
+        self.create_task_with_branch(project, title, desc, priority, actor, None)
             .await
     }
 
     pub async fn create_task_with_branch(
         &self,
+        project: &str,
         title: &str,
         desc: Option<&str>,
         priority: u8,
         actor: &str,
         target_branch: Option<&str>,
     ) -> Result<Task> {
+        validate_project(project)?;
         let id = id::generate();
         let now = now_iso();
+        let project = project.to_string();
         let conn = self.conn.clone();
         let id2 = id.clone();
         let title = title.to_string();
@@ -169,8 +194,8 @@ impl Database {
         tokio::task::spawn_blocking(move || -> Result<()> {
             let c = conn.lock().unwrap();
             c.execute(
-                "INSERT INTO tasks (id, title, description, status, priority, assignee, target_branch, created_at, updated_at) VALUES (?1, ?2, ?3, 'pending', ?4, NULL, ?5, ?6, ?6)",
-                params![&id2, &title, desc.as_deref().unwrap_or(""), priority, target_branch.as_deref(), &now],
+                "INSERT INTO tasks (id, title, description, status, priority, assignee, target_branch, created_at, updated_at, project) VALUES (?1, ?2, ?3, 'pending', ?4, NULL, ?5, ?6, ?6, ?7)",
+                params![&id2, &title, desc.as_deref().unwrap_or(""), priority, target_branch.as_deref(), &now, &project],
             )?;
             record_event(&c, &id2, &actor, "created", None, None, None)?;
             Ok(())
@@ -198,8 +223,9 @@ impl Database {
         &self,
         status: Option<&str>,
         assignee: Option<&str>,
+        project: Option<&str>,
     ) -> Result<Vec<Task>> {
-        let (sql, param_values) = build_list_query(status, assignee);
+        let (sql, param_values) = build_list_query(status, assignee, project);
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let c = conn.lock().unwrap();
@@ -220,7 +246,7 @@ impl Database {
             let c = conn.lock().unwrap();
             // Claimable: open, unassigned, no open blocker, no unanswered question set,
             // and not a reminder that is still in the future.
-            let sql = "SELECT t.id, t.title, t.description, t.status, t.priority, t.assignee, t.target_branch, t.created_at, t.updated_at, t.due_at, t.delivered_at FROM tasks t WHERE t.status IN ('pending', 'ready') AND t.assignee IS NULL AND t.id NOT IN (SELECT d.task_id FROM dependencies d JOIN tasks bt ON d.depends_on = bt.id WHERE bt.status NOT IN ('completed', 'done')) AND NOT EXISTS (SELECT 1 FROM task_questions q WHERE q.task_id = t.id AND q.answered_at IS NULL) AND (t.due_at IS NULL OR t.due_at <= ?1) ORDER BY t.priority DESC, t.created_at ASC";
+            let sql = "SELECT t.id, t.title, t.description, t.status, t.priority, t.assignee, t.target_branch, t.created_at, t.updated_at, t.due_at, t.delivered_at, t.project FROM tasks t WHERE t.status IN ('pending', 'ready') AND t.assignee IS NULL AND t.id NOT IN (SELECT d.task_id FROM dependencies d JOIN tasks bt ON d.depends_on = bt.id WHERE bt.status NOT IN ('completed', 'done')) AND NOT EXISTS (SELECT 1 FROM task_questions q WHERE q.task_id = t.id AND q.answered_at IS NULL) AND (t.due_at IS NULL OR t.due_at <= ?1) ORDER BY t.priority DESC, t.created_at ASC";
             let mut stmt = c.prepare(sql)?;
             let mut rows = stmt.query(params![now_iso()])?;
             collect_tasks(&mut rows)
@@ -270,6 +296,9 @@ impl Database {
     }
 
     pub async fn update_task(&self, id: &str, updates: TaskUpdates<'_>, actor: &str) -> Result<()> {
+        if let Some(project) = updates.project {
+            validate_project(project)?;
+        }
         let due_at = match updates.due_at {
             Some(value) if !value.is_empty() => Some(normalize_due_at(value)?),
             other => other.map(str::to_owned),
@@ -552,7 +581,7 @@ const SCHEMA: &str = "
         id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT,
         status TEXT NOT NULL DEFAULT 'pending', priority INTEGER NOT NULL DEFAULT 0,
         assignee TEXT, target_branch TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-        due_at TEXT, delivered_at TEXT
+        due_at TEXT, delivered_at TEXT, project TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS dependencies (
         task_id TEXT NOT NULL REFERENCES tasks(id),
@@ -600,6 +629,71 @@ fn migrate(conn: &Connection) -> Result<()> {
             "ALTER TABLE tasks ADD COLUMN due_at TEXT; ALTER TABLE tasks ADD COLUMN delivered_at TEXT;",
         )?;
     }
+    migrate_project(conn)
+}
+
+/// Make `tasks.project` required on databases created before projects existed.
+/// Step 1 adds a nullable column. Every task then needs a project, which only the
+/// operator can choose; until then opening the database fails with the fix.
+/// Step 2 rebuilds the table with `project TEXT NOT NULL` (SQLite cannot alter
+/// a column's constraint in place).
+fn migrate_project(conn: &Connection) -> Result<()> {
+    if conn.prepare("SELECT project FROM tasks LIMIT 0").is_err() {
+        conn.execute_batch("ALTER TABLE tasks ADD COLUMN project TEXT")?;
+    }
+    let not_null: bool = conn.query_row(
+        "SELECT \"notnull\" FROM pragma_table_info('tasks') WHERE name = 'project'",
+        [],
+        |row| row.get(0),
+    )?;
+    if not_null {
+        return Ok(());
+    }
+    let missing: i64 = conn.query_row(
+        "SELECT count(*) FROM tasks WHERE project IS NULL OR project = ''",
+        [],
+        |row| row.get(0),
+    )?;
+    anyhow::ensure!(
+        missing == 0,
+        "{missing} tasks have no project. Set one on each before opening this database, e.g. \
+         sqlite3 <db> \"UPDATE tasks SET project = 'misc' WHERE project IS NULL\""
+    );
+    // SQLite's table-rebuild procedure: foreign keys off (only possible outside a
+    // transaction), check them before commit, then restore the previous setting.
+    let foreign_keys: bool = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
+    conn.execute_batch("PRAGMA foreign_keys = OFF")?;
+    let rebuilt = rebuild_tasks_with_required_project(conn);
+    if rebuilt.is_err() {
+        conn.execute_batch("ROLLBACK").ok();
+    }
+    conn.pragma_update(None, "foreign_keys", foreign_keys)?;
+    rebuilt
+}
+
+fn rebuild_tasks_with_required_project(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "BEGIN IMMEDIATE;
+         CREATE TABLE tasks_new (
+             id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT,
+             status TEXT NOT NULL DEFAULT 'pending', priority INTEGER NOT NULL DEFAULT 0,
+             assignee TEXT, target_branch TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+             due_at TEXT, delivered_at TEXT, project TEXT NOT NULL
+         );
+         INSERT INTO tasks_new SELECT id, title, description, status, priority, assignee,
+             target_branch, created_at, updated_at, due_at, delivered_at, project FROM tasks;
+         DROP TABLE tasks;
+         ALTER TABLE tasks_new RENAME TO tasks;",
+    )?;
+    let violations: i64 =
+        conn.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })?;
+    anyhow::ensure!(
+        violations == 0,
+        "rebuilding tasks broke {violations} foreign keys"
+    );
+    conn.execute_batch("COMMIT")?;
     Ok(())
 }
 
@@ -677,6 +771,7 @@ fn field_changes(
             updates.target_branch,
         ),
         FieldChange::new("due_at", task.due_at.as_deref(), due_at.as_deref()),
+        FieldChange::new("project", Some(&task.project), updates.project),
     ]
 }
 
@@ -714,7 +809,11 @@ fn apply_field_update(
     Ok(())
 }
 
-fn build_list_query(status: Option<&str>, assignee: Option<&str>) -> (String, Vec<String>) {
+fn build_list_query(
+    status: Option<&str>,
+    assignee: Option<&str>,
+    project: Option<&str>,
+) -> (String, Vec<String>) {
     let mut sql = format!("SELECT {TASK_COLUMNS} FROM tasks");
     let mut conditions = Vec::new();
     let mut params = Vec::new();
@@ -725,6 +824,10 @@ fn build_list_query(status: Option<&str>, assignee: Option<&str>) -> (String, Ve
     if let Some(a) = assignee {
         params.push(a.to_string());
         conditions.push(format!("assignee = ?{}", params.len()));
+    }
+    if let Some(p) = project {
+        params.push(p.to_string());
+        conditions.push(format!("project = ?{}", params.len()));
     }
     if !conditions.is_empty() {
         sql.push_str(" WHERE ");
@@ -763,6 +866,7 @@ fn row_to_task(row: &rusqlite::Row) -> Task {
         updated_at: row.get(8).unwrap_or_default(),
         due_at: row.get(9).ok(),
         delivered_at: row.get(10).ok(),
+        project: row.get(11).unwrap_or_default(),
     }
 }
 

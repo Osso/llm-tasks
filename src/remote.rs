@@ -109,6 +109,7 @@ fn segment(value: &str) -> String {
 
 #[derive(Serialize)]
 struct CreateTask<'a> {
+    project: &'a str,
     title: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<&'a str>,
@@ -129,6 +130,8 @@ struct TaskUpdate<'a> {
     assignee: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     target_branch: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     due_at: Option<&'a str>,
 }
@@ -162,6 +165,7 @@ struct AddComment<'a> {
 impl TaskStore for HttpStore {
     async fn create_task(
         &self,
+        project: &str,
         title: &str,
         desc: Option<&str>,
         priority: u8,
@@ -172,6 +176,7 @@ impl TaskStore for HttpStore {
             "tasks",
             Some(actor),
             Some(CreateTask {
+                project,
                 title,
                 description: desc,
                 priority,
@@ -190,7 +195,12 @@ impl TaskStore for HttpStore {
         .await
     }
 
-    async fn list_tasks(&self, status: Option<&str>, assignee: Option<&str>) -> Result<Vec<Task>> {
+    async fn list_tasks(
+        &self,
+        status: Option<&str>,
+        assignee: Option<&str>,
+        project: Option<&str>,
+    ) -> Result<Vec<Task>> {
         let mut url = self.url("tasks")?;
         {
             let mut query = url.query_pairs_mut();
@@ -199,6 +209,9 @@ impl TaskStore for HttpStore {
             }
             if let Some(assignee) = assignee {
                 query.append_pair("assignee", assignee);
+            }
+            if let Some(project) = project {
+                query.append_pair("project", project);
             }
         }
         let response = self.client.get(url).bearer_auth(&self.token).send().await?;
@@ -229,6 +242,7 @@ impl TaskStore for HttpStore {
             assignee: updates.assignee,
             target_branch: updates.target_branch,
             due_at: updates.due_at,
+            project: updates.project,
         };
         self.send_empty(
             Method::PATCH,

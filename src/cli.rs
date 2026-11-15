@@ -61,6 +61,9 @@ pub enum Command {
         /// Due time, RFC 3339 with offset (e.g. 2026-11-15T09:00:00-06:00); makes the task a reminder
         #[arg(long)]
         due: Option<String>,
+        /// Project slug (required), e.g. wow-ui-sim
+        #[arg(long, env = "LT_PROJECT")]
+        project: String,
     },
 
     /// List tasks
@@ -71,6 +74,9 @@ pub enum Command {
         /// Filter by assignee
         #[arg(short, long)]
         assignee: Option<String>,
+        /// Filter by project
+        #[arg(long)]
+        project: Option<String>,
     },
 
     /// Show unblocked tasks ready for work
@@ -110,6 +116,9 @@ pub enum Command {
         /// New due time, RFC 3339 with offset; "" clears it. Clears the delivery mark
         #[arg(long)]
         due: Option<String>,
+        /// Move the task to another project
+        #[arg(long)]
+        project: Option<String>,
     },
 
     /// Close a task

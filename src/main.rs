@@ -80,8 +80,10 @@ async fn handle_core_command(
             description,
             priority,
             due,
+            project,
         } => {
             let new_task = NewTask {
+                project: &project,
                 title: &title,
                 description: description.as_deref(),
                 priority,
@@ -89,14 +91,13 @@ async fn handle_core_command(
             };
             cmd_create(context, new_task).await?
         }
-        Command::List { status, assignee } => {
-            cmd_list(
-                context.db,
-                status.as_deref(),
-                assignee.as_deref(),
-                context.json,
-            )
-            .await?
+        Command::List {
+            status,
+            assignee,
+            project,
+        } => {
+            let filters = (status.as_deref(), assignee.as_deref(), project.as_deref());
+            cmd_list(context.db, filters, context.json).await?
         }
         Command::Ready => print_tasks(&context.db.ready_tasks().await?, context.json)?,
         Command::Due => print_tasks(&context.db.due_tasks().await?, context.json)?,
@@ -119,6 +120,7 @@ async fn handle_task_command(
             title,
             description,
             due,
+            project,
         } => {
             let updates = TaskUpdates {
                 status: status.as_deref(),
@@ -126,6 +128,7 @@ async fn handle_task_command(
                 title: title.as_deref(),
                 description: description.as_deref(),
                 due_at: due.as_deref(),
+                project: project.as_deref(),
                 ..Default::default()
             };
             context.db.update_task(&id, updates, context.actor).await?;
@@ -178,6 +181,7 @@ async fn handle_task_command(
 }
 
 struct NewTask<'a> {
+    project: &'a str,
     title: &'a str,
     description: Option<&'a str>,
     priority: u8,
@@ -194,6 +198,7 @@ async fn cmd_create(
     let (db, actor) = (context.db, context.actor);
     let mut task = db
         .create_task(
+            new_task.project,
             new_task.title,
             new_task.description,
             new_task.priority,
@@ -216,13 +221,15 @@ async fn cmd_create(
     Ok(())
 }
 
+/// (status, assignee, project) filters.
+type ListFilters<'a> = (Option<&'a str>, Option<&'a str>, Option<&'a str>);
+
 async fn cmd_list(
     db: &impl TaskStore,
-    status: Option<&str>,
-    assignee: Option<&str>,
+    (status, assignee, project): ListFilters<'_>,
     json: bool,
 ) -> anyhow::Result<()> {
-    let tasks = db.list_tasks(status, assignee).await?;
+    let tasks = db.list_tasks(status, assignee, project).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&tasks)?);
     } else {
@@ -233,9 +240,10 @@ async fn cmd_list(
                 .map(|a| format!("({})", a))
                 .unwrap_or_default();
             println!(
-                "{} [{}] {} {}{}",
+                "{} [{}] {} {} {}{}",
                 t.id,
                 t.status,
+                t.project,
                 t.title,
                 who,
                 due_suffix(t)
@@ -250,7 +258,14 @@ fn print_tasks(tasks: &[Task], json: bool) -> anyhow::Result<()> {
         println!("{}", serde_json::to_string_pretty(tasks)?);
     } else {
         for t in tasks {
-            println!("{} [p{}] {}{}", t.id, t.priority, t.title, due_suffix(t));
+            println!(
+                "{} [p{}] {} {}{}",
+                t.id,
+                t.priority,
+                t.project,
+                t.title,
+                due_suffix(t)
+            );
         }
     }
     Ok(())
@@ -354,6 +369,7 @@ async fn cmd_history(db: &impl TaskStore, id: &str, json: bool) -> anyhow::Resul
 fn print_task(task: &Task, deps: &[Dependency]) {
     println!("ID:       {}", task.id);
     println!("Title:    {}", task.title);
+    println!("Project:  {}", task.project);
     if let Some(desc) = &task.description {
         println!("Desc:     {}", desc);
     }
