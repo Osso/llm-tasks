@@ -140,6 +140,7 @@ textarea.field { height: auto; padding: 8px; resize: vertical; line-height: 1.5;
 /* status glyph: dot shape + color, never color alone (label is in group head and select) */
 .st { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--text-3); display: inline-block; }
 .st.in_progress { border-color: var(--info); background: conic-gradient(var(--info) 0 50%, transparent 50% 100%); }
+.st.scheduled { border: 1.5px dashed var(--warning); }
 .st.blocked { border-color: var(--danger); background: var(--danger); border-radius: 2px; }
 .st.completed, .st.done { border-color: var(--success); background: var(--success); }
 
@@ -247,8 +248,11 @@ dialog label { display: grid; gap: 4px; color: var(--text-2); }
 <script>
 "use strict";
 const ACTOR = "web";
+// Stored statuses an operator can set.
 const STATUSES = ["in_progress", "pending", "blocked", "completed"];
-const STATUS_LABEL = { in_progress: "In progress", pending: "Pending", blocked: "Blocked", completed: "Completed", done: "Done", ready: "Ready" };
+// List groups: "scheduled" is derived (open, due time in the future), not stored.
+const GROUPS = ["in_progress", "pending", "scheduled", "blocked", "completed"];
+const STATUS_LABEL = { in_progress: "In progress", pending: "Pending", scheduled: "Scheduled", blocked: "Blocked", completed: "Completed", done: "Done", ready: "Ready" };
 const PRIORITY_LABEL = ["None", "Low", "Medium", "High"];
 const COMPLETED_LIMIT = 50;
 
@@ -375,13 +379,16 @@ function visibleTasks() {
     (!state.readyOnly || state.ready.has(task.id)));
 }
 function groupOf(task) {
-  return task.status === "done" ? "completed" : STATUSES.includes(task.status) ? task.status : "pending";
+  if (task.status === "done" || task.status === "completed") return "completed";
+  if (task.status !== "in_progress" && task.status !== "blocked" && task.due_at && Date.parse(task.due_at) > Date.now()) return "scheduled";
+  return STATUSES.includes(task.status) ? task.status : "pending";
 }
 function renderCounts() {
   const count = (status) => state.tasks.filter((task) => groupOf(task) === status).length;
   $("counts").replaceChildren(
     h("span", null, h("b", { class: "num" }, count("in_progress")), " in progress"),
     h("span", null, h("b", { class: "num" }, state.ready.size), " ready"),
+    h("span", null, h("b", { class: "num" }, count("scheduled")), " scheduled"),
     h("span", null, h("b", { class: "num" }, count("blocked")), " blocked"));
 }
 function renderAssignees() {
@@ -407,7 +414,7 @@ function taskRow(task) {
   },
     h("span", { class: "prio", dataset: { p: String(Math.min(task.priority, 3)) }, title: `Priority: ${PRIORITY_LABEL[Math.min(task.priority, 3)]}` }, h("i"), h("i"), h("i")),
     h("span", { class: "id" }, task.id),
-    h("span", { class: "st " + task.status, title: STATUS_LABEL[task.status] || task.status }),
+    h("span", { class: "st " + (groupOf(task) === "scheduled" ? "scheduled" : task.status), title: STATUS_LABEL[groupOf(task) === "scheduled" ? "scheduled" : task.status] || task.status }),
     h("span", { class: "title" }, task.title),
     h("span", { class: "tags" }, tags.filter(Boolean)),
     h("span", { class: "assignee" }, task.assignee || ""),
@@ -418,10 +425,11 @@ function renderList() {
   const list = $("list");
   const scroll = list.scrollTop;
   const nodes = [];
-  for (const status of STATUSES) {
+  for (const status of GROUPS) {
     let group = tasks.filter((task) => groupOf(task) === status);
     if (!group.length) continue;
     if (status === "completed") group = group.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+    if (status === "scheduled") group = group.sort((a, b) => a.due_at.localeCompare(b.due_at));
     const expanded = !state.collapsed.has(status);
     nodes.push(h("button", {
       class: "group-head", "aria-expanded": String(expanded),
@@ -667,7 +675,12 @@ document.addEventListener("keydown", (e) => {
     if (id !== (state.selected || "")) select(id || null);
   });
   setInterval(poll, 3000);
-  setInterval(() => document.querySelectorAll("time[datetime]").forEach((el) => { el.textContent = relative(el.getAttribute("datetime")); }), 30000);
+  // Re-group too: a scheduled task becomes pending when its due time passes, with no event.
+  setInterval(() => {
+    renderCounts();
+    renderList();
+    document.querySelectorAll("time[datetime]").forEach((el) => { el.textContent = relative(el.getAttribute("datetime")); });
+  }, 30000);
 })();
 </script>
 </body>
