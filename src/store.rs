@@ -27,7 +27,12 @@ pub trait TaskStore {
         project: Option<&str>,
     ) -> impl Future<Output = Result<Vec<Task>>> + Send;
     fn ready_tasks(&self) -> impl Future<Output = Result<Vec<Task>>> + Send;
-    fn claim_task(&self, id: &str, actor: &str) -> impl Future<Output = Result<()>> + Send;
+    fn claim_task(
+        &self,
+        id: &str,
+        project: &str,
+        actor: &str,
+    ) -> impl Future<Output = Result<()>> + Send;
     /// Claim the best ready task in `project`; `None` when none is ready.
     fn claim_next(
         &self,
@@ -131,8 +136,8 @@ impl TaskStore for Database {
         Database::ready_tasks(self).await
     }
 
-    async fn claim_task(&self, id: &str, actor: &str) -> Result<()> {
-        Database::claim_task(self, id, actor).await
+    async fn claim_task(&self, id: &str, project: &str, actor: &str) -> Result<()> {
+        Database::claim_task(self, id, project, actor).await
     }
 
     async fn claim_next(&self, project: &str, actor: &str) -> Result<Option<Task>> {

@@ -311,10 +311,10 @@ async fn cmd_claim(
     id: Option<String>,
     project: Option<String>,
 ) -> anyhow::Result<()> {
+    let Some(project) = project else {
+        anyhow::bail!("project is required to claim a task; pass --project or set LT_PROJECT");
+    };
     let Some(id) = id else {
-        let Some(project) = project else {
-            anyhow::bail!("project is required to claim a task; pass --project or set LT_PROJECT");
-        };
         let Some(task) = context.db.claim_next(&project, context.actor).await? else {
             anyhow::bail!("No ready task to claim");
         };
@@ -325,7 +325,7 @@ async fn cmd_claim(
         }
         return Ok(());
     };
-    context.db.claim_task(&id, context.actor).await?;
+    context.db.claim_task(&id, &project, context.actor).await?;
     println!("Claimed {} for {}", id, context.actor);
     Ok(())
 }

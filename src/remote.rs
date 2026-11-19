@@ -137,7 +137,7 @@ struct TaskUpdate<'a> {
 }
 
 #[derive(Serialize)]
-struct ClaimNext<'a> {
+struct ClaimProject<'a> {
     project: &'a str,
 }
 
@@ -228,12 +228,12 @@ impl TaskStore for HttpStore {
             .await
     }
 
-    async fn claim_task(&self, id: &str, actor: &str) -> Result<()> {
+    async fn claim_task(&self, id: &str, project: &str, actor: &str) -> Result<()> {
         self.send_empty(
             Method::POST,
             &format!("tasks/{}/claim", segment(id)),
             Some(actor),
-            None::<serde_json::Value>,
+            Some(ClaimProject { project }),
         )
         .await
     }
@@ -243,7 +243,7 @@ impl TaskStore for HttpStore {
             Method::POST,
             "tasks/claim",
             Some(actor),
-            Some(ClaimNext { project }),
+            Some(ClaimProject { project }),
         )
         .await
     }

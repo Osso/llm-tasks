@@ -1,4 +1,4 @@
-use llm_tasks::db::{Conflict, Database, NotFound, TaskUpdates};
+use llm_tasks::db::{Conflict, Database, Invalid, NotFound, TaskUpdates};
 use tempfile::TempDir;
 
 async fn temp_db() -> (Database, TempDir) {
@@ -92,7 +92,7 @@ async fn list_tasks_filter_by_assignee() {
     db.create_task("test", "Unclaimed", None, 0, "a")
         .await
         .unwrap();
-    db.claim_task(&t1.id, "dev-0").await.unwrap();
+    db.claim_task(&t1.id, "test", "dev-0").await.unwrap();
 
     let assigned = db.list_tasks(None, Some("dev-0"), None).await.unwrap();
     assert_eq!(assigned.len(), 1);
@@ -115,9 +115,13 @@ async fn list_tasks_filters_by_status_and_assignee() {
         .await
         .unwrap();
 
-    db.claim_task(&matching.id, "dev-0").await.unwrap();
-    db.claim_task(&wrong_assignee.id, "dev-1").await.unwrap();
-    db.claim_task(&wrong_status.id, "dev-0").await.unwrap();
+    db.claim_task(&matching.id, "test", "dev-0").await.unwrap();
+    db.claim_task(&wrong_assignee.id, "test", "dev-1")
+        .await
+        .unwrap();
+    db.claim_task(&wrong_status.id, "test", "dev-0")
+        .await
+        .unwrap();
     db.close_task(&wrong_status.id, "dev-0").await.unwrap();
 
     let tasks = db
@@ -137,7 +141,7 @@ async fn claim_sets_assignee_and_in_progress() {
         .await
         .unwrap();
 
-    db.claim_task(&task.id, "dev-0").await.unwrap();
+    db.claim_task(&task.id, "test", "dev-0").await.unwrap();
 
     let updated = db.get_task(&task.id).await.unwrap();
     assert_eq!(updated.assignee.as_deref(), Some("dev-0"));
@@ -149,8 +153,8 @@ async fn claim_rejects_already_claimed() {
     let (db, _dir) = temp_db().await;
     let task = db.create_task("test", "Race", None, 0, "a").await.unwrap();
 
-    db.claim_task(&task.id, "dev-0").await.unwrap();
-    let result = db.claim_task(&task.id, "dev-1").await;
+    db.claim_task(&task.id, "test", "dev-0").await.unwrap();
+    let result = db.claim_task(&task.id, "test", "dev-1").await;
 
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("Cannot claim"));
@@ -160,7 +164,7 @@ async fn claim_rejects_already_claimed() {
 async fn claim_rejects_ready_task_with_assignee() {
     let (db, _dir) = temp_db().await;
     let task = db.create_task("test", "Race", None, 0, "a").await.unwrap();
-    db.claim_task(&task.id, "dev-0").await.unwrap();
+    db.claim_task(&task.id, "test", "dev-0").await.unwrap();
     db.update_task(
         &task.id,
         TaskUpdates {
@@ -173,7 +177,7 @@ async fn claim_rejects_ready_task_with_assignee() {
     .unwrap();
 
     let err = db
-        .claim_task(&task.id, "dev-1")
+        .claim_task(&task.id, "test", "dev-1")
         .await
         .unwrap_err()
         .to_string();
@@ -187,8 +191,28 @@ async fn claim_rejects_completed() {
     let task = db.create_task("test", "Done", None, 0, "a").await.unwrap();
     db.close_task(&task.id, "a").await.unwrap();
 
-    let result = db.claim_task(&task.id, "dev-0").await;
+    let result = db.claim_task(&task.id, "test", "dev-0").await;
     assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn claim_rejects_a_task_from_another_project() {
+    let (db, _dir) = temp_db().await;
+    let task = db
+        .create_task("alpha", "Scoped", None, 0, "a")
+        .await
+        .unwrap();
+
+    let error = db.claim_task(&task.id, "beta", "dev-0").await.unwrap_err();
+    assert!(error.downcast_ref::<Invalid>().is_some());
+    assert!(error.to_string().contains("belongs to project alpha"));
+    assert!(db.get_task(&task.id).await.unwrap().assignee.is_none());
+
+    db.claim_task(&task.id, "alpha", "dev-0").await.unwrap();
+    assert_eq!(
+        db.get_task(&task.id).await.unwrap().assignee.as_deref(),
+        Some("dev-0")
+    );
 }
 
 #[tokio::test]
@@ -459,7 +483,7 @@ async fn events_track_full_lifecycle() {
         .await
         .unwrap();
 
-    db.claim_task(&task.id, "worker").await.unwrap();
+    db.claim_task(&task.id, "test", "worker").await.unwrap();
     db.close_task(&task.id, "worker").await.unwrap();
 
     let events = db.get_events(&task.id).await.unwrap();
@@ -554,7 +578,7 @@ async fn clear_assignee_sets_null() {
         .create_task("test", "Assigned", None, 0, "a")
         .await
         .unwrap();
-    db.claim_task(&task.id, "dev-0").await.unwrap();
+    db.claim_task(&task.id, "test", "dev-0").await.unwrap();
 
     assert_eq!(
         db.get_task(&task.id).await.unwrap().assignee.as_deref(),
@@ -570,7 +594,7 @@ async fn clear_assignee_sets_null() {
 async fn clear_assignee_makes_task_ready_dispatchable() {
     let (db, _dir) = temp_db().await;
     let task = db.create_task("test", "Stuck", None, 0, "a").await.unwrap();
-    db.claim_task(&task.id, "dev-0").await.unwrap();
+    db.claim_task(&task.id, "test", "dev-0").await.unwrap();
 
     // Set back to ready but assignee still set
     let updates = TaskUpdates {
@@ -652,7 +676,7 @@ async fn concurrent_claims_across_connections_have_one_winner() {
         };
         let id = task.id.clone();
         claims.push(tokio::spawn(async move {
-            db.claim_task(&id, &format!("agent-{n}")).await
+            db.claim_task(&id, "test", &format!("agent-{n}")).await
         }));
     }
     let mut winners = 0;
@@ -677,7 +701,7 @@ async fn concurrent_claims_across_connections_have_one_winner() {
 #[tokio::test]
 async fn claim_missing_task_is_not_found() {
     let (db, _dir) = temp_db().await;
-    let error = db.claim_task("lt-none", "a").await.unwrap_err();
+    let error = db.claim_task("lt-none", "test", "a").await.unwrap_err();
     assert!(error.downcast_ref::<NotFound>().is_some());
 }
 

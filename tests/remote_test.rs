@@ -144,7 +144,10 @@ async fn task_and_comment_responses_deserialize_and_requests_follow_contract() {
         .await
         .unwrap();
     store.ready_tasks().await.unwrap();
-    store.claim_task("task one", "agent-a").await.unwrap();
+    store
+        .claim_task("task one", "test", "agent-a")
+        .await
+        .unwrap();
     let claimed_next = store.claim_next("test", "agent-a").await.unwrap().unwrap();
     assert_eq!(claimed_next.id, "task one");
     let claimed_other_project = store
@@ -211,6 +214,10 @@ async fn task_and_comment_responses_deserialize_and_requests_follow_contract() {
         request("POST", "/tasks/task%20one/claim").actor.as_deref(),
         Some("agent-a")
     );
+    assert_eq!(
+        request("POST", "/tasks/task%20one/claim").body,
+        json!({"project":"test"})
+    );
     let claim_next_requests: Vec<&RecordedRequest> = requests
         .iter()
         .filter(|r| r.method == "POST" && r.path == "/tasks/claim")
@@ -264,7 +271,10 @@ async fn api_errors_preserve_typed_messages_and_surface_other_statuses() {
 
     let error = store.get_task("not-found").await.unwrap_err();
     assert_eq!(error.downcast_ref::<NotFound>().unwrap().0, "task absent");
-    let error = store.claim_task("conflict", "agent-a").await.unwrap_err();
+    let error = store
+        .claim_task("conflict", "test", "agent-a")
+        .await
+        .unwrap_err();
     assert_eq!(error.downcast_ref::<Conflict>().unwrap().0, "claim denied");
     let error = store.get_task("failure").await.unwrap_err().to_string();
     assert!(error.contains("500"));

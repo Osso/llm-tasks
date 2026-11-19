@@ -15,7 +15,7 @@ lt due                          # reminders past due, not yet delivered
 lt attach lt-a1b2 build.log     # file stored with the task (max 10 MiB)
 lt ask lt-a1b2 '[{"question":"Which DB?","options":[{"label":"SQLite"},{"label":"Postgres"}]}]'
 lt answer 1 '{"Which DB?":"SQLite"}'   # the task is not ready until answered
-lt claim lt-a1b2 --actor me     # atomic: exactly one claimer wins
+lt claim lt-a1b2 --project sakuin   # atomic by ID: exactly one claimer wins
 lt claim                        # claim the best ready task from required LT_PROJECT
 lt claim --project sakuin       # ... or from an explicit project
 lt close lt-a1b2
@@ -31,9 +31,11 @@ lt serve --addr 127.0.0.1:8095 --token-file tokens   # one bearer token per line
 LT_URL=https://tasks.example LT_TOKEN=... lt ready    # same commands, remote store
 ```
 
-Without an ID, `lt claim` selects one ready task by priority descending, then
-creation time and ID ascending. The shared server selects and claims it in one
-SQLite transaction; concurrent callers cannot claim the same task.
+Every claim needs a project (`--project` or `LT_PROJECT`); claiming a task ID
+from another project is rejected. Without an ID, `lt claim` selects one ready
+task by priority descending, then creation time and ID ascending. The shared
+server selects and claims it in one SQLite transaction; concurrent callers
+cannot claim the same task.
 
 `lt serve` speaks plain HTTP; put a TLS-terminating proxy in front of it. The API
 contract is [docs/specs/http-api.md](docs/specs/http-api.md). Production runs on

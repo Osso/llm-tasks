@@ -95,7 +95,7 @@ pub enum Command {
     Claim {
         /// Task ID; omit to claim the highest-priority ready task
         id: Option<String>,
-        /// Project to claim from (required when the ID is omitted)
+        /// Project that owns the task; required for every claim
         #[arg(long, env = "LT_PROJECT")]
         project: Option<String>,
     },

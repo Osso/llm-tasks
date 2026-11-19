@@ -265,24 +265,33 @@ impl Database {
     /// Claim in one conditional UPDATE inside a transaction, so concurrent
     /// claimers (in-process or separate processes on the same file) get exactly
     /// one winner; the losers see `Conflict`.
-    pub async fn claim_task(&self, id: &str, actor: &str) -> Result<()> {
+    /// Claim a task that belongs to `project`. A task from another project is
+    /// rejected, so claimers can never take work that is not theirs.
+    pub async fn claim_task(&self, id: &str, project: &str, actor: &str) -> Result<()> {
         let now = now_iso();
         let conn = self.conn.clone();
         let id = id.to_string();
+        let project = project.to_string();
         let actor = actor.to_string();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut c = conn.lock().unwrap();
             let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let previous: Option<(String, Option<String>)> = tx
+            let previous: Option<(String, Option<String>, String)> = tx
                 .query_row(
-                    "SELECT status, assignee FROM tasks WHERE id = ?1",
+                    "SELECT status, assignee, project FROM tasks WHERE id = ?1",
                     params![&id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .optional()?;
-            let Some((status, assignee)) = previous else {
+            let Some((status, assignee, task_project)) = previous else {
                 return Err(NotFound(format!("Task not found: {}", id)).into());
             };
+            if task_project != project {
+                return Err(Invalid(format!(
+                    "Task {id} belongs to project {task_project}, not {project}"
+                ))
+                .into());
+            }
             let claimed = tx.execute(CLAIM_UPDATE, params![&actor, &now, &id])?;
             if claimed == 0 {
                 let reason = match assignee {

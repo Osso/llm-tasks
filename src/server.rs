@@ -374,12 +374,16 @@ async fn claim_task(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     headers: HeaderMap,
+    Json(body): Json<ClaimProject>,
 ) -> Response {
-    no_content(state.db.claim_task(&id, actor(&headers)).await)
+    let Some(project) = body.project else {
+        return error_response(Invalid("project is required".to_owned()).into());
+    };
+    no_content(state.db.claim_task(&id, &project, actor(&headers)).await)
 }
 
 #[derive(Deserialize)]
-struct ClaimNext {
+struct ClaimProject {
     /// Optional in the type only, so a missing project is a 400 with a clear message.
     project: Option<String>,
 }
@@ -387,7 +391,7 @@ struct ClaimNext {
 async fn claim_next(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<ClaimNext>,
+    Json(body): Json<ClaimProject>,
 ) -> Response {
     let Some(project) = body.project else {
         return error_response(Invalid("project is required".to_owned()).into());

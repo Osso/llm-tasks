@@ -99,6 +99,7 @@ async fn create_get_list_ready_claim_close_records_actor() {
         reqwest::Method::POST,
         format!("{base}/tasks/{id}/claim"),
     )
+    .json(&json!({"project": "test"}))
     .header("X-LT-Actor", "worker-7")
     .send()
     .await
@@ -215,6 +216,7 @@ async fn second_claim_returns_409_and_dependency_changes_readiness() {
         reqwest::Method::POST,
         format!("{base}/tasks/{blocker_id}/claim"),
     )
+    .json(&json!({"project": "test"}))
     .send()
     .await
     .unwrap();
@@ -224,6 +226,7 @@ async fn second_claim_returns_409_and_dependency_changes_readiness() {
         reqwest::Method::POST,
         format!("{base}/tasks/{blocker_id}/claim"),
     )
+    .json(&json!({"project": "test"}))
     .send()
     .await
     .unwrap();
@@ -261,6 +264,7 @@ async fn concurrent_http_claims_have_one_winner() {
                 .post(url)
                 .bearer_auth(TOKEN)
                 .header("X-LT-Actor", format!("actor-{index}"))
+                .json(&json!({"project": "test"}))
                 .send()
                 .await
                 .unwrap()
@@ -344,6 +348,53 @@ async fn claim_next_requires_a_project() {
     assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
     let body: Value = response.json().await.unwrap();
     assert_eq!(body["error"], "project is required");
+}
+
+#[tokio::test]
+async fn claim_by_id_requires_the_task_project() {
+    let (base, client, _dir) = start_server().await;
+    let task = create(&client, &base, "Scoped claim").await;
+    let id = task["id"].as_str().unwrap().to_owned();
+
+    let missing = request(
+        &client,
+        reqwest::Method::POST,
+        format!("{base}/tasks/{id}/claim"),
+    )
+    .json(&json!({}))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(missing.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let wrong = request(
+        &client,
+        reqwest::Method::POST,
+        format!("{base}/tasks/{id}/claim"),
+    )
+    .json(&json!({"project": "other"}))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(wrong.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body: Value = wrong.json().await.unwrap();
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("belongs to project test")
+    );
+
+    let claim = request(
+        &client,
+        reqwest::Method::POST,
+        format!("{base}/tasks/{id}/claim"),
+    )
+    .json(&json!({"project": "test"}))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(claim.status(), reqwest::StatusCode::NO_CONTENT);
 }
 
 #[tokio::test]

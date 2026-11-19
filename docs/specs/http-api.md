@@ -13,9 +13,8 @@ is set; every command behaves the same as in local mode.
 - [x] `--ui-addr <ip:port>` (optional) binds a second listener on the same database. It serves the web dashboard at `GET /` (`ui/index.html`, compiled in) and every API route WITHOUT bearer auth, so it must only be bound to a network-restricted address (production: the droplet's home-WireGuard address). The main listener does not serve `/`. The dashboard sends `X-LT-Actor: web`. It lists tasks grouped by status, plus a derived Scheduled group (open, not in progress or blocked, `due_at` in the future; it moves to Pending once due, re-evaluated every 30 s), with text, assignee and ready filters, and edits status, priority, assignee, due time, branch, title and description. It also creates and closes tasks, adds and removes blockers, comments, uploads and downloads attachments, and answers question sets. It refreshes when `/events` reports new events (polled every 3 s).
 - [x] Every route on the main listener except `GET /healthz` requires `Authorization: Bearer <token>`; a missing or unknown token returns 401 before any database access. Token comparison is constant-time.
 - [x] The actor for the audit trail comes from the `X-LT-Actor` header (default `unknown`). It is caller-asserted, not authenticated.
-- [x] Concurrent claims by ID of one task over HTTP produce exactly one 204; every other claimer gets 409.
-- [x] A claim by ID uses one conditional `UPDATE` in an immediate transaction; events are recorded only for the winning claim.
-- [x] `POST /tasks/claim` with `{"project"}` selects and claims one ready task of that project in one immediate SQLite transaction, ordered by priority DESC, created_at ASC, id ASC. It returns 200 with the claimed `Task`, 204 when nothing is ready, and 400 when project is missing or null. It does not validate the supplied project slug. Concurrent callers never receive the same task. `lt claim` without an ID requires `--project` or `LT_PROJECT` and needs no prior `lt ready`.
+- [x] Concurrent claims by ID of one task over HTTP produce exactly one 204; every other claimer gets 409. A claim by ID requires `{"project"}` and returns 400 unless it equals the task's project; a claim by ID uses one conditional `UPDATE` in an immediate transaction, and events are recorded only for the winning claim.
+- [x] `POST /tasks/claim` with `{"project"}` selects and claims one ready task of that project in one immediate SQLite transaction, ordered by priority DESC, created_at ASC, id ASC. It returns 200 with the claimed `Task`, 204 when nothing is ready, and 400 when project is missing or null. It does not validate the supplied project slug. Concurrent callers never receive the same task. `lt claim` requires `--project` or `LT_PROJECT` with or without an ID, and without an ID it needs no prior `lt ready`.
 - [x] Reminders are tasks with a due time. `due_at` and `delivered_at` are RFC 3339 UTC (`...Z`) or null. Input due times need an explicit offset and are normalized to UTC; any other value returns 400. Changing `due_at`, or setting status back to `pending`, clears `delivered_at`.
 - [x] `GET /tasks/due` returns tasks whose status is not `completed`/`done`, whose `due_at` is at or before the server's current time, and whose `delivered_at` is null, ordered by `due_at`. `POST /tasks/{id}/delivered` with `{"due_at"}` sets `delivered_at` only when that due time is still current, undelivered and open (one conditional `UPDATE`); otherwise 409. It records a `delivered` event. The Pi Supervisor polls this route and delivers each due task into its conversation.
 - [x] Every task belongs to a project: a lowercase slug matching `^[a-z0-9][a-z0-9-]{0,39}$` (e.g. `wow-ui-sim`), stored in `tasks.project TEXT NOT NULL`. Projects need no registration. `POST /tasks` without `project` or with an invalid one returns 400; `PATCH` may move a task to another valid project (recorded as an `updated` event on field `project`). `GET /tasks?project=` filters. CLI: `lt create --project <slug>` (default `LT_PROJECT`; required), `lt list --project`, `lt update --project`; list and show output include the project. The dashboard shows a project column, a project selector kept in `?project=`, and a required project in the create dialog.
@@ -49,7 +48,7 @@ Request bodies are JSON except for attachment uploads. Store errors are `{"error
 | POST | `/questions/{id}/answer` | `{"answers"}` | 204 | `answer_questions` |
 | POST | `/tasks/{id}/delivered` | `{"due_at"}` | 204 | `mark_delivered` |
 | POST | `/tasks/claim` | `{"project"}` (required) | 200 `Task`, or 204 when nothing is ready | `claim_next` |
-| POST | `/tasks/{id}/claim` | — | 204 | `claim_task` |
+| POST | `/tasks/{id}/claim` | `{"project"}` (required) | 204, or 400 for a missing or foreign project | `claim_task` |
 | POST | `/tasks/{id}/close` | — | 204 | `close_task` |
 | GET | `/tasks/{id}/dependencies` | — | 200 `[Dependency]` | `get_dependencies` |
 | POST | `/tasks/{id}/dependencies` | `{"depends_on", "dep_type"?}` (default `blocks`) | 204 | `add_dependency` |
@@ -68,18 +67,19 @@ Request bodies are JSON except for attachment uploads. Store errors are `{"error
 | `db::Conflict` | 409 |
 | `db::Invalid` (missing or invalid project, bad due time, question set, answers, attachment name or size) | 400 |
 | request body over 10 MiB | 413 |
-| missing or null `project` in `/tasks/claim` | 400 |
+| missing or null `project` in `/tasks/claim` or `/tasks/{id}/claim` | 400 |
+| task does not belong to the claimed project | 400 |
 | malformed JSON | 400 (axum default rejection) |
 | invalid JSON data / missing required field | 422 (axum default rejection) |
 | anything else | 500 |
 
 ## Tests asserting this spec
 
-- `tests/db_test.rs`: atomic claim (concurrent claimers, one winner, one event pair); one-command claim (priority, project filter, concurrent `claim_next` never double-claims); due listing, due-time validation, delivery reset on reschedule/reopen, stale or repeated delivery conflicts; future reminders not ready; question validation, ready blocking until answered, single answer; attachment round trip, size cap.
+- `tests/db_test.rs`: atomic claim (concurrent claimers, one winner, one event pair); cross-project claim rejection; one-command claim (priority, project filter, concurrent `claim_next` never double-claims); due listing, due-time validation, delivery reset on reschedule/reopen, stale or repeated delivery conflicts; future reminders not ready; question validation, ready blocking until answered, single answer; attachment round trip, size cap.
 - `tests/db_test.rs` (projects): validation, `?project` filter, moving a task with its event; legacy database with tasks refuses to open until backfilled, then rebuilds NOT NULL keeping tasks, due times and dependencies.
 - `tests/server_test.rs`: missing/invalid project on creation and missing project on claim return 400, `?project=` filter; the dashboard listener (page, tokenless writes visible through the token API with actor `web`, main listener 401 without token and 404 for `/`); auth, routes, error mapping, concurrent HTTP claims (by ID and `POST /tasks/claim`), `/rules` auth, live file edits and 404 when unconfigured, `/events` cursor feed, `/tasks/due` and delivery acknowledgement; `HttpStore` attachments (non-ASCII name, 413) and questions (400, 409, ready blocking) against the real router.
 - `tests/remote_test.rs`: `HttpStore` request shapes, including the project claim body, and error mapping against a stub server.
-- `tests/cli_remote_test.rs`: a real `lt serve` process and `lt` clients in `LT_URL` mode: round trip, single claim winner, one-command `lt claim`, empty claim exit status, 401, 404.
+- `tests/cli_remote_test.rs`: a real `lt serve` process and `lt` clients in `LT_URL` mode: round trip, single claim winner, one-command `lt claim`, required project for both claim forms, foreign-project rejection, empty claim exit status, 401, 404.
 
 ## Watcher
 
