@@ -74,6 +74,7 @@ fn api(state: AppState) -> Router {
         .route("/rules", get(rules))
         .route("/events", get(events_after))
         .route("/tasks", post(create_task).get(list_tasks))
+        .route("/tasks/claim", post(claim_next))
         .route("/tasks/ready", get(ready_tasks))
         .route("/tasks/due", get(due_tasks))
         .route("/tasks/{id}/delivered", post(mark_delivered))
@@ -375,6 +376,27 @@ async fn claim_task(
     headers: HeaderMap,
 ) -> Response {
     no_content(state.db.claim_task(&id, actor(&headers)).await)
+}
+
+#[derive(Deserialize)]
+struct ClaimNext {
+    /// Optional in the type only, so a missing project is a 400 with a clear message.
+    project: Option<String>,
+}
+
+async fn claim_next(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ClaimNext>,
+) -> Response {
+    let Some(project) = body.project else {
+        return error_response(Invalid("project is required".to_owned()).into());
+    };
+    match state.db.claim_next(&project, actor(&headers)).await {
+        Ok(Some(task)) => (StatusCode::OK, Json(task)).into_response(),
+        Ok(None) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => error_response(error),
+    }
 }
 
 async fn close_task(

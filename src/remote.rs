@@ -137,6 +137,11 @@ struct TaskUpdate<'a> {
 }
 
 #[derive(Serialize)]
+struct ClaimNext<'a> {
+    project: &'a str,
+}
+
+#[derive(Serialize)]
 struct AskQuestions {
     questions: Vec<Question>,
 }
@@ -229,6 +234,16 @@ impl TaskStore for HttpStore {
             &format!("tasks/{}/claim", segment(id)),
             Some(actor),
             None::<serde_json::Value>,
+        )
+        .await
+    }
+
+    async fn claim_next(&self, project: &str, actor: &str) -> Result<Option<Task>> {
+        self.send(
+            Method::POST,
+            "tasks/claim",
+            Some(actor),
+            Some(ClaimNext { project }),
         )
         .await
     }

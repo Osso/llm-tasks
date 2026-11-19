@@ -281,6 +281,72 @@ async fn concurrent_http_claims_have_one_winner() {
 }
 
 #[tokio::test]
+async fn concurrent_claim_next_requests_never_share_a_task() {
+    let (base, client, _dir) = start_server().await;
+    let mut created = Vec::new();
+    for n in 0..4 {
+        let task = create(&client, &base, &format!("Task {n}")).await;
+        created.push(task["id"].as_str().unwrap().to_owned());
+    }
+
+    let mut claims = Vec::new();
+    for index in 0..12 {
+        let client = client.clone();
+        let url = format!("{base}/tasks/claim");
+        claims.push(tokio::spawn(async move {
+            client
+                .post(url)
+                .bearer_auth(TOKEN)
+                .header("X-LT-Actor", format!("actor-{index}"))
+                .json(&json!({"project": "test"}))
+                .send()
+                .await
+                .unwrap()
+        }));
+    }
+
+    let mut claimed = Vec::new();
+    let mut empty = 0;
+    for claim in claims {
+        let response = claim.await.unwrap();
+        match response.status() {
+            reqwest::StatusCode::OK => {
+                let task: Value = response.json().await.unwrap();
+                assert_eq!(task["status"], "in_progress");
+                claimed.push(task["id"].as_str().unwrap().to_owned());
+            }
+            reqwest::StatusCode::NO_CONTENT => empty += 1,
+            status => panic!("unexpected claim response: {status}"),
+        }
+    }
+
+    claimed.sort();
+    created.sort();
+    assert_eq!(claimed, created);
+    assert_eq!(empty, 8);
+}
+
+#[tokio::test]
+async fn claim_next_requires_a_project() {
+    let (base, client, _dir) = start_server().await;
+    create(&client, &base, "Needs a project").await;
+
+    let response = request(
+        &client,
+        reqwest::Method::POST,
+        format!("{base}/tasks/claim"),
+    )
+    .json(&json!({}))
+    .send()
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"], "project is required");
+}
+
+#[tokio::test]
 async fn token_file_requires_nonblank_tokens() {
     let dir = TempDir::new().unwrap();
     let missing = dir.path().join("missing");

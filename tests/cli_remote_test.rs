@@ -122,6 +122,35 @@ async fn remote_cli_round_trip_and_single_claim_winner() {
     assert!(history.contains("planner created"));
     assert!(history.contains("worker-a claimed"));
     assert!(history.contains("worker-a closed"));
+
+    let created_second = stdout(&lt(
+        &server,
+        TOKEN,
+        "planner",
+        &["--json", "create", "Second task", "-p", "0"],
+    ));
+    let second_task: serde_json::Value = serde_json::from_str(&created_second).unwrap();
+    let second_id = second_task["id"].as_str().unwrap().to_owned();
+
+    let claimed_next = stdout(&lt(&server, TOKEN, "worker-b", &["claim"]));
+    assert!(claimed_next.contains(&second_id), "{claimed_next}");
+    let shown_second: serde_json::Value = serde_json::from_str(&stdout(&lt(
+        &server,
+        TOKEN,
+        "worker-b",
+        &["--json", "show", &second_id],
+    )))
+    .unwrap();
+    assert_eq!(shown_second["assignee"], "worker-b");
+    assert_eq!(shown_second["status"], "in_progress");
+
+    let none_ready = lt(&server, TOKEN, "worker-c", &["claim"]);
+    assert!(!none_ready.status.success());
+    assert!(
+        String::from_utf8_lossy(&none_ready.stderr).contains("No ready task to claim"),
+        "{}",
+        String::from_utf8_lossy(&none_ready.stderr)
+    );
 }
 
 #[tokio::test]
@@ -135,4 +164,26 @@ async fn remote_cli_rejects_unknown_token_and_missing_task() {
     let missing = lt(&server, TOKEN, "worker-a", &["show", "lt-none"]);
     assert!(!missing.status.success());
     assert!(String::from_utf8_lossy(&missing.stderr).contains("Task not found: lt-none"));
+}
+
+#[tokio::test]
+async fn one_command_claim_requires_a_project() {
+    let server = start_server().await;
+
+    let output = Command::new(LT)
+        .env("LT_URL", &server.url)
+        .env("LT_TOKEN", TOKEN)
+        .env("LT_ACTOR", "worker-a")
+        .env_remove("LT_PROJECT")
+        .env_remove("LT_DB")
+        .args(["claim"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("project is required to claim a task"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

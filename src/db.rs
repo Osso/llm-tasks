@@ -50,6 +50,14 @@ const TASK_COLUMNS: &str = "id, title, description, status, priority, assignee, 
 /// Statuses that end a task; closed tasks are never due.
 const CLOSED_STATUSES: &str = "('completed', 'done')";
 
+/// A task can be claimed or listed as ready when it is open, unassigned, has no
+/// open blocker, has no unanswered question set, and is not a reminder that is
+/// still in the future. `?1` is the current time; `t` is the task table alias.
+const READY_PREDICATE: &str = "t.status IN ('pending', 'ready') AND t.assignee IS NULL AND t.id NOT IN (SELECT d.task_id FROM dependencies d JOIN tasks bt ON d.depends_on = bt.id WHERE bt.status NOT IN ('completed', 'done')) AND NOT EXISTS (SELECT 1 FROM task_questions q WHERE q.task_id = t.id AND q.answered_at IS NULL) AND (t.due_at IS NULL OR t.due_at <= ?1)";
+
+/// Marks a task in_progress for `?1`; only an unassigned open task matches.
+const CLAIM_UPDATE: &str = "UPDATE tasks SET assignee = ?1, status = 'in_progress', updated_at = ?2 WHERE id = ?3 AND (status = 'pending' OR status = 'ready') AND assignee IS NULL";
+
 /// A project name: lowercase slug, 1-40 characters, e.g. `wow-ui-sim`.
 pub fn validate_project(value: &str) -> Result<()> {
     let mut chars = value.chars();
@@ -244,10 +252,10 @@ impl Database {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let c = conn.lock().unwrap();
-            // Claimable: open, unassigned, no open blocker, no unanswered question set,
-            // and not a reminder that is still in the future.
-            let sql = "SELECT t.id, t.title, t.description, t.status, t.priority, t.assignee, t.target_branch, t.created_at, t.updated_at, t.due_at, t.delivered_at, t.project FROM tasks t WHERE t.status IN ('pending', 'ready') AND t.assignee IS NULL AND t.id NOT IN (SELECT d.task_id FROM dependencies d JOIN tasks bt ON d.depends_on = bt.id WHERE bt.status NOT IN ('completed', 'done')) AND NOT EXISTS (SELECT 1 FROM task_questions q WHERE q.task_id = t.id AND q.answered_at IS NULL) AND (t.due_at IS NULL OR t.due_at <= ?1) ORDER BY t.priority DESC, t.created_at ASC";
-            let mut stmt = c.prepare(sql)?;
+            let sql = format!(
+                "SELECT t.id, t.title, t.description, t.status, t.priority, t.assignee, t.target_branch, t.created_at, t.updated_at, t.due_at, t.delivered_at, t.project FROM tasks t WHERE {READY_PREDICATE} ORDER BY t.priority DESC, t.created_at ASC, t.id ASC"
+            );
+            let mut stmt = c.prepare(&sql)?;
             let mut rows = stmt.query(params![now_iso()])?;
             collect_tasks(&mut rows)
         })
@@ -275,10 +283,7 @@ impl Database {
             let Some((status, assignee)) = previous else {
                 return Err(NotFound(format!("Task not found: {}", id)).into());
             };
-            let claimed = tx.execute(
-                "UPDATE tasks SET assignee = ?1, status = 'in_progress', updated_at = ?2 WHERE id = ?3 AND (status = 'pending' OR status = 'ready') AND assignee IS NULL",
-                params![&actor, &now, &id],
-            )?;
+            let claimed = tx.execute(CLAIM_UPDATE, params![&actor, &now, &id])?;
             if claimed == 0 {
                 let reason = match assignee {
                     Some(owner) => format!("already assigned to {}", owner),
@@ -286,13 +291,48 @@ impl Database {
                 };
                 return Err(Conflict(format!("Cannot claim task {}: {}", id, reason)).into());
             }
-            record_event(&tx, &id, &actor, "claimed", Some("assignee"), None, Some(&actor))?;
-            record_event(&tx, &id, &actor, "updated", Some("status"), Some(&status), Some("in_progress"))?;
+            record_claim_events(&tx, &id, &actor, &status)?;
             tx.commit()?;
             Ok(())
         })
         .await??;
         Ok(())
+    }
+
+    /// Claim the best ready task in `project` (highest priority, then oldest)
+    /// in one immediate transaction, so concurrent callers never receive the
+    /// same task.
+    pub async fn claim_next(&self, project: &str, actor: &str) -> Result<Option<Task>> {
+        let now = now_iso();
+        let conn = self.conn.clone();
+        let actor = actor.to_string();
+        let project = project.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Option<Task>> {
+            let mut c = conn.lock().unwrap();
+            let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let sql = format!(
+                "SELECT t.id, t.status FROM tasks t WHERE {READY_PREDICATE} AND t.project = ?2 ORDER BY t.priority DESC, t.created_at ASC, t.id ASC LIMIT 1"
+            );
+            let next: Option<(String, String)> = tx
+                .query_row(&sql, params![&now, &project], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .optional()?;
+            let Some((id, status)) = next else {
+                return Ok(None);
+            };
+            let claimed = tx.execute(CLAIM_UPDATE, params![&actor, &now, &id])?;
+            anyhow::ensure!(claimed == 1, "ready task {id} changed while claiming");
+            record_claim_events(&tx, &id, &actor, &status)?;
+            let task = tx.query_row(
+                &format!("SELECT {TASK_COLUMNS} FROM tasks WHERE id = ?1"),
+                params![&id],
+                |row| Ok(row_to_task(row)),
+            )?;
+            tx.commit()?;
+            Ok(Some(task))
+        })
+        .await?
     }
 
     pub async fn update_task(&self, id: &str, updates: TaskUpdates<'_>, actor: &str) -> Result<()> {
@@ -708,6 +748,32 @@ fn event_from_row(row: &rusqlite::Row) -> rusqlite::Result<Event> {
         new_value: row.get(6)?,
         timestamp: row.get(7)?,
     })
+}
+
+fn record_claim_events(
+    conn: &Connection,
+    task_id: &str,
+    actor: &str,
+    previous_status: &str,
+) -> Result<()> {
+    record_event(
+        conn,
+        task_id,
+        actor,
+        "claimed",
+        Some("assignee"),
+        None,
+        Some(actor),
+    )?;
+    record_event(
+        conn,
+        task_id,
+        actor,
+        "updated",
+        Some("status"),
+        Some(previous_status),
+        Some("in_progress"),
+    )
 }
 
 pub(crate) fn record_event(

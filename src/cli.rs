@@ -91,10 +91,13 @@ pub enum Command {
         id: String,
     },
 
-    /// Atomically claim a task
+    /// Claim a task atomically; without an ID, claim the best ready task
     Claim {
-        /// Task ID
-        id: String,
+        /// Task ID; omit to claim the highest-priority ready task
+        id: Option<String>,
+        /// Project to claim from (required when the ID is omitted)
+        #[arg(long, env = "LT_PROJECT")]
+        project: Option<String>,
     },
 
     /// Update a task

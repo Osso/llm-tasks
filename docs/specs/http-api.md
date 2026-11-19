@@ -15,6 +15,7 @@ is set; every command behaves the same as in local mode.
 - [x] The actor for the audit trail comes from the `X-LT-Actor` header (default `unknown`). It is caller-asserted, not authenticated.
 - [x] Concurrent claims of one task over HTTP produce exactly one 204; every other claimer gets 409.
 - [x] A claim is one conditional `UPDATE` in an immediate transaction; events are recorded only for the winning claim.
+- [x] `POST /tasks/claim` with `{"project"}` claims the best ready task of that project (highest priority, then oldest) in one request and transaction: 200 with the claimed `Task`, 204 when nothing is ready, 400 without a project. Concurrent callers never receive the same task, so `lt claim` needs no prior `lt ready` and cannot lose a read-then-claim race.
 - [x] Reminders are tasks with a due time. `due_at` and `delivered_at` are RFC 3339 UTC (`...Z`) or null. Input due times need an explicit offset and are normalized to UTC; any other value returns 400. Changing `due_at`, or setting status back to `pending`, clears `delivered_at`.
 - [x] `GET /tasks/due` returns tasks whose status is not `completed`/`done`, whose `due_at` is at or before the server's current time, and whose `delivered_at` is null, ordered by `due_at`. `POST /tasks/{id}/delivered` with `{"due_at"}` sets `delivered_at` only when that due time is still current, undelivered and open (one conditional `UPDATE`); otherwise 409. It records a `delivered` event. The Pi Supervisor polls this route and delivers each due task into its conversation.
 - [x] Every task belongs to a project: a lowercase slug matching `^[a-z0-9][a-z0-9-]{0,39}$` (e.g. `wow-ui-sim`), stored in `tasks.project TEXT NOT NULL`. Projects need no registration. `POST /tasks` without `project` or with an invalid one returns 400; `PATCH` may move a task to another valid project (recorded as an `updated` event on field `project`). `GET /tasks?project=` filters. CLI: `lt create --project <slug>` (default `LT_PROJECT`; required), `lt list --project`, `lt update --project`; list and show output include the project. The dashboard shows a project column, a project selector kept in `?project=`, and a required project in the create dialog.
@@ -47,6 +48,7 @@ All bodies are JSON. Errors are `{"error": "<message>"}`.
 | GET | `/tasks/{id}/questions` | — | 200 `[QuestionSet]` | `list_questions` |
 | POST | `/questions/{id}/answer` | `{"answers"}` | 204 | `answer_questions` |
 | POST | `/tasks/{id}/delivered` | `{"due_at"}` | 204 | `mark_delivered` |
+| POST | `/tasks/claim` | `{"project"}` (required) | 200 `Task`, or 204 when nothing is ready | `claim_next` |
 | POST | `/tasks/{id}/claim` | — | 204 | `claim_task` |
 | POST | `/tasks/{id}/close` | — | 204 | `close_task` |
 | GET | `/tasks/{id}/dependencies` | — | 200 `[Dependency]` | `get_dependencies` |
@@ -71,15 +73,15 @@ All bodies are JSON. Errors are `{"error": "<message>"}`.
 
 ## Tests asserting this spec
 
-- `tests/db_test.rs`: atomic claim (concurrent claimers, one winner, one event pair); due listing, due-time validation, delivery reset on reschedule/reopen, stale or repeated delivery conflicts; future reminders not ready; question validation, ready blocking until answered, single answer; attachment round trip, size cap.
+- `tests/db_test.rs`: atomic claim (concurrent claimers, one winner, one event pair); one-command claim (priority order, project filter, concurrent `claim_next` never double-claims); due listing, due-time validation, delivery reset on reschedule/reopen, stale or repeated delivery conflicts; future reminders not ready; question validation, ready blocking until answered, single answer; attachment round trip, size cap.
 - `tests/db_test.rs` (projects): validation, `?project` filter, moving a task with its event; legacy database with tasks refuses to open until backfilled, then rebuilds NOT NULL keeping tasks, due times and dependencies.
-- `tests/server_test.rs`: missing/invalid project returns 400, `?project=` filter; the dashboard listener (page, tokenless writes visible through the token API with actor `web`, main listener 401 without token and 404 for `/`); auth, routes, error mapping, concurrent HTTP claims, `/rules` auth, live file edits and 404 when unconfigured, `/events` cursor feed, `/tasks/due` and delivery acknowledgement; `HttpStore` attachments (non-ASCII name, 413) and questions (400, 409, ready blocking) against the real router.
+- `tests/server_test.rs`: missing/invalid project returns 400, `?project=` filter; the dashboard listener (page, tokenless writes visible through the token API with actor `web`, main listener 401 without token and 404 for `/`); auth, routes, error mapping, concurrent HTTP claims (by ID and `POST /tasks/claim`), `/rules` auth, live file edits and 404 when unconfigured, `/events` cursor feed, `/tasks/due` and delivery acknowledgement; `HttpStore` attachments (non-ASCII name, 413) and questions (400, 409, ready blocking) against the real router.
 
 ## Watcher
 
 `pi-extension/lt-watch.ts` is a Pi extension that polls `/events` and wakes a session only when another actor changes the tracker. It is enabled per Pi session in `~/.config/llm-tasks/watch.json`; the file header documents the format. Install it by copying it to `~/.config/pi/agent/extensions/`.
 - `tests/remote_test.rs`: `HttpStore` request shapes and 404/409/500 mapping against a stub server.
-- `tests/cli_remote_test.rs`: a real `lt serve` process and `lt` clients in `LT_URL` mode: round trip, single claim winner, 401, 404.
+- `tests/cli_remote_test.rs`: a real `lt serve` process and `lt` clients in `LT_URL` mode: round trip, single claim winner, one-command `lt claim`, empty claim exit status, 401, 404.
 
 ## Out of scope
 

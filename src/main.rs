@@ -112,7 +112,7 @@ async fn handle_task_command(
 ) -> anyhow::Result<()> {
     match command {
         Command::Show { id } => cmd_show(context.db, &id, context.json).await?,
-        Command::Claim { id } => cmd_claim(context.db, &id, context.actor).await?,
+        Command::Claim { id, project } => cmd_claim(context, id, project).await?,
         Command::Update {
             id,
             status,
@@ -306,9 +306,27 @@ async fn cmd_show(db: &impl TaskStore, id: &str, json: bool) -> anyhow::Result<(
     Ok(())
 }
 
-async fn cmd_claim(db: &impl TaskStore, id: &str, actor: &str) -> anyhow::Result<()> {
-    db.claim_task(id, actor).await?;
-    println!("Claimed {} for {}", id, actor);
+async fn cmd_claim(
+    context: &CommandContext<'_, impl TaskStore>,
+    id: Option<String>,
+    project: Option<String>,
+) -> anyhow::Result<()> {
+    let Some(id) = id else {
+        let Some(project) = project else {
+            anyhow::bail!("project is required to claim a task; pass --project or set LT_PROJECT");
+        };
+        let Some(task) = context.db.claim_next(&project, context.actor).await? else {
+            anyhow::bail!("No ready task to claim");
+        };
+        if context.json {
+            println!("{}", serde_json::to_string_pretty(&task)?);
+        } else {
+            println!("Claimed {} [{}] {}", task.id, task.project, task.title);
+        }
+        return Ok(());
+    };
+    context.db.claim_task(&id, context.actor).await?;
+    println!("Claimed {} for {}", id, context.actor);
     Ok(())
 }
 

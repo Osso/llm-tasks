@@ -16,6 +16,8 @@ lt attach lt-a1b2 build.log     # file stored with the task (max 10 MiB)
 lt ask lt-a1b2 '[{"question":"Which DB?","options":[{"label":"SQLite"},{"label":"Postgres"}]}]'
 lt answer 1 '{"Which DB?":"SQLite"}'   # the task is not ready until answered
 lt claim lt-a1b2 --actor me     # atomic: exactly one claimer wins
+lt claim                        # claim the best ready task from LT_PROJECT
+lt claim --project sakuin       # ... or from an explicit project
 lt close lt-a1b2
 ```
 

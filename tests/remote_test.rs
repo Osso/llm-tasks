@@ -79,6 +79,7 @@ async fn record_request(State(state): State<StubState>, request: Request<Body>) 
         path if path == "/tasks" || path == "/tasks/ready" || path == "/tasks/due" => {
             (200, json!([task_json()]))
         }
+        "/tasks/claim" if parts.method == "POST" => (200, task_json()),
         path if path.starts_with("/tasks/") && parts.method == "GET" => (200, task_json()),
         _ => (204, Value::Null),
     };
@@ -144,6 +145,14 @@ async fn task_and_comment_responses_deserialize_and_requests_follow_contract() {
         .unwrap();
     store.ready_tasks().await.unwrap();
     store.claim_task("task one", "agent-a").await.unwrap();
+    let claimed_next = store.claim_next("test", "agent-a").await.unwrap().unwrap();
+    assert_eq!(claimed_next.id, "task one");
+    let claimed_other_project = store
+        .claim_next("wow-ui-sim", "agent-a")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed_other_project.project, "test");
     store.close_task("task one", "agent-a").await.unwrap();
     store.get_dependencies("task one").await.unwrap();
     store
@@ -202,6 +211,14 @@ async fn task_and_comment_responses_deserialize_and_requests_follow_contract() {
         request("POST", "/tasks/task%20one/claim").actor.as_deref(),
         Some("agent-a")
     );
+    let claim_next_requests: Vec<&RecordedRequest> = requests
+        .iter()
+        .filter(|r| r.method == "POST" && r.path == "/tasks/claim")
+        .collect();
+    assert_eq!(claim_next_requests.len(), 2);
+    assert_eq!(claim_next_requests[0].body, json!({"project":"test"}));
+    assert_eq!(claim_next_requests[0].actor.as_deref(), Some("agent-a"));
+    assert_eq!(claim_next_requests[1].body, json!({"project":"wow-ui-sim"}));
     assert_eq!(
         request("POST", "/tasks/task%20one/close").actor.as_deref(),
         Some("agent-a")

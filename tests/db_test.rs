@@ -1101,3 +1101,89 @@ async fn projects_are_validated_filtered_and_movable() {
         )
     );
 }
+
+#[tokio::test]
+async fn claim_next_takes_highest_priority_then_oldest_and_reports_empty() {
+    let (db, _dir) = temp_db().await;
+    let low = db.create_task("test", "Low", None, 1, "a").await.unwrap();
+    let high = db.create_task("test", "High", None, 3, "a").await.unwrap();
+
+    let first = db.claim_next("test", "dev-0").await.unwrap().unwrap();
+    assert_eq!(first.id, high.id);
+    assert_eq!(first.status, "in_progress");
+    assert_eq!(first.assignee.as_deref(), Some("dev-0"));
+
+    let second = db.claim_next("test", "dev-1").await.unwrap().unwrap();
+    assert_eq!(second.id, low.id);
+
+    assert!(db.claim_next("test", "dev-2").await.unwrap().is_none());
+
+    let claimed_events = db
+        .get_events(&high.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.action == "claimed" && event.actor == "dev-0")
+        .count();
+    assert_eq!(claimed_events, 1);
+}
+
+#[tokio::test]
+async fn claim_next_respects_the_project_filter() {
+    let (db, _dir) = temp_db().await;
+    let alpha = db
+        .create_task("alpha", "Alpha", None, 1, "a")
+        .await
+        .unwrap();
+    let beta = db.create_task("beta", "Beta", None, 3, "a").await.unwrap();
+
+    let claimed = db.claim_next("alpha", "dev-0").await.unwrap().unwrap();
+    assert_eq!(claimed.id, alpha.id);
+
+    assert!(db.claim_next("alpha", "dev-0").await.unwrap().is_none());
+    let claimed = db.claim_next("beta", "dev-0").await.unwrap().unwrap();
+    assert_eq!(claimed.id, beta.id);
+}
+
+#[tokio::test]
+async fn concurrent_claim_next_never_double_claims() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("shared.db");
+    let first = std::sync::Arc::new(Database::open(&path).await.unwrap());
+    let second = std::sync::Arc::new(Database::open(&path).await.unwrap());
+    let mut task_ids = Vec::new();
+    for n in 0..4 {
+        task_ids.push(
+            first
+                .create_task("test", &format!("Task {n}"), None, n, "a")
+                .await
+                .unwrap()
+                .id,
+        );
+    }
+
+    let mut claims = Vec::new();
+    for n in 0..12 {
+        let db = if n % 2 == 0 {
+            first.clone()
+        } else {
+            second.clone()
+        };
+        claims.push(tokio::spawn(async move {
+            db.claim_next("test", &format!("agent-{n}"))
+                .await
+                .unwrap()
+                .map(|task| task.id)
+        }));
+    }
+    let mut claimed = Vec::new();
+    for claim in claims {
+        if let Some(id) = claim.await.unwrap() {
+            claimed.push(id);
+        }
+    }
+
+    claimed.sort();
+    task_ids.sort();
+    assert_eq!(claimed, task_ids);
+}
