@@ -31,11 +31,13 @@ lt serve --addr 127.0.0.1:8095 --token-file tokens   # one bearer token per line
 LT_URL=https://tasks.example LT_TOKEN=... lt ready    # same commands, remote store
 ```
 
-Every claim needs a project (`--project` or `LT_PROJECT`); claiming a task ID
-from another project is rejected. Without an ID, `lt claim` selects one ready
-task by priority descending, then creation time and ID ascending. The shared
+Every claim needs a non-blank project (`--project` or `LT_PROJECT`); claiming a
+task ID from another project is rejected without changing the task. Claims
+compare the project exactly and do not validate its slug format. Without an ID,
+`lt claim` selects one ready task by priority descending, then creation time and
+ID ascending. The shared
 server selects and claims it in one SQLite transaction; concurrent callers
-cannot claim the same task.
+cannot claim the same task. The CLI reports an error when no task is ready.
 
 `lt serve` speaks plain HTTP; put a TLS-terminating proxy in front of it. The API
 contract is [docs/specs/http-api.md](docs/specs/http-api.md). Production runs on
