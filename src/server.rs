@@ -376,7 +376,7 @@ async fn claim_task(
     headers: HeaderMap,
     Json(body): Json<ClaimProject>,
 ) -> Response {
-    let Some(project) = body.project else {
+    let Some(project) = body.project.filter(|value| !value.trim().is_empty()) else {
         return error_response(Invalid("project is required".to_owned()).into());
     };
     no_content(state.db.claim_task(&id, &project, actor(&headers)).await)
@@ -393,7 +393,7 @@ async fn claim_next(
     headers: HeaderMap,
     Json(body): Json<ClaimProject>,
 ) -> Response {
-    let Some(project) = body.project else {
+    let Some(project) = body.project.filter(|value| !value.trim().is_empty()) else {
         return error_response(Invalid("project is required".to_owned()).into());
     };
     match state.db.claim_next(&project, actor(&headers)).await {

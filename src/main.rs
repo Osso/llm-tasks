@@ -311,7 +311,7 @@ async fn cmd_claim(
     id: Option<String>,
     project: Option<String>,
 ) -> anyhow::Result<()> {
-    let Some(project) = project else {
+    let Some(project) = project.filter(|value| !value.trim().is_empty()) else {
         anyhow::bail!("project is required to claim a task; pass --project or set LT_PROJECT");
     };
     let Some(id) = id else {

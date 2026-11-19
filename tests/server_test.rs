@@ -348,6 +348,21 @@ async fn claim_next_requires_a_project() {
     assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
     let body: Value = response.json().await.unwrap();
     assert_eq!(body["error"], "project is required");
+
+    for project in ["", "  "] {
+        let response = request(
+            &client,
+            reqwest::Method::POST,
+            format!("{base}/tasks/claim"),
+        )
+        .json(&json!({"project": project}))
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["error"], "project is required");
+    }
 }
 
 #[tokio::test]
@@ -366,6 +381,17 @@ async fn claim_by_id_requires_the_task_project() {
     .await
     .unwrap();
     assert_eq!(missing.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let empty = request(
+        &client,
+        reqwest::Method::POST,
+        format!("{base}/tasks/{id}/claim"),
+    )
+    .json(&json!({"project": ""}))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(empty.status(), reqwest::StatusCode::BAD_REQUEST);
 
     let wrong = request(
         &client,

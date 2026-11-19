@@ -192,22 +192,26 @@ async fn every_claim_requires_a_project() {
     let id = task["id"].as_str().unwrap().to_owned();
 
     for args in [vec!["claim"], vec!["claim", id.as_str()]] {
-        let output = Command::new(LT)
-            .env("LT_URL", &server.url)
-            .env("LT_TOKEN", TOKEN)
-            .env("LT_ACTOR", "worker-a")
-            .env_remove("LT_PROJECT")
-            .env_remove("LT_DB")
-            .args(&args)
-            .output()
-            .unwrap();
+        for env in [None, Some(""), Some("  ")] {
+            let output = Command::new(LT)
+                .env("LT_URL", &server.url)
+                .env("LT_TOKEN", TOKEN)
+                .env("LT_ACTOR", "worker-a")
+                .env_remove("LT_PROJECT")
+                .env_remove("LT_DB")
+                .args(&args)
+                .envs(env.map(|value| ("LT_PROJECT", value)))
+                .output()
+                .unwrap();
 
-        assert!(!output.status.success(), "args: {args:?}");
-        assert!(
-            String::from_utf8_lossy(&output.stderr).contains("project is required to claim a task"),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+            assert!(!output.status.success(), "args: {args:?}, env: {env:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("project is required to claim a task"),
+                "args: {args:?}, env: {env:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
     stdout(&lt(&server, TOKEN, "planner", &["close", &id]));
 }
